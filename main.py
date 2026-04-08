@@ -291,7 +291,7 @@ def send_email(file_path: str) -> None:
     msg = MIMEMultipart()
     msg["From"] = sender
     msg["To"] = receiver
-    msg["Subject"] = f"Franchise Link Report - {datetime.now().strftime('%d %b %Y')}"
+    msg["Subject"] = f"Franchise Links Report - {datetime.now().strftime('%d %b %Y')}"
 
     body = "Please find attached the daily franchise link check report (CSV)."
     msg.attach(MIMEText(body, "plain"))
