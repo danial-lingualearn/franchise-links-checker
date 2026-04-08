@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Franchise Broken Links Checker – Playwright‑based + Email Report"""
+"""Franchise Broken Links Checker – Dynamic Playwright Extraction + Email Report"""
 
 import csv
 import sys
@@ -15,7 +15,7 @@ from email.mime.base import MIMEBase
 from email import encoders
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Dict, List, Tuple, Optional, Any
+from typing import Dict, List, Any
 from urllib.parse import urljoin, urlparse, urlunparse
 
 import httpx
@@ -39,7 +39,6 @@ class Config:
     }
 
 config = Config()
-PLAYWRIGHT_AVAILABLE = True
 
 class RateLimiter:
     def __init__(self, rate: float):
@@ -73,18 +72,17 @@ def extract_urls(page_url: str) -> List[Dict[str, Any]]:
             context = browser.new_context(user_agent=config.HEADERS["User-Agent"])
             page = context.new_page()
             page.goto(page_url, timeout=30000, wait_until="domcontentloaded")
-            
-            # Scroll to bottom to trigger lazy loading
-            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            page.wait_for_timeout(3000)
-            
-            # Wait for any element containing "Visit Website" to appear
+            # Scroll to bottom in steps to trigger lazy loading
+            for _ in range(3):
+                page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                page.wait_for_timeout(2000)
+            # Wait for network idle after scrolling
+            page.wait_for_load_state("networkidle", timeout=10000)
+            # Ensure "Visit Website" links are present
             try:
                 page.wait_for_selector("a:has-text('Visit Website')", timeout=10000)
             except Exception:
-                print("Timeout waiting for 'Visit Website' links, but continuing...")
-            
-            # Get the full HTML after scrolling
+                print("Warning: 'Visit Website' links not found after waiting, but continuing...")
             html = page.content()
             browser.close()
     except Exception as e:
@@ -94,32 +92,6 @@ def extract_urls(page_url: str) -> List[Dict[str, Any]]:
     seen = set()
     entries = []
 
-    def find_country_for_anchor(a_tag) -> str:
-        """Walk up the DOM tree looking for a heading (h2/h3/h4) that names the country."""
-        # Strategy 1: find the closest preceding sibling heading anywhere in the ancestor chain
-        node = a_tag
-        for _ in range(10):  # limit traversal depth
-            node = node.parent
-            if node is None:
-                break
-            for heading_tag in ("h2", "h3", "h4"):
-                h = node.find_previous_sibling(heading_tag)
-                if h:
-                    text = h.get_text(strip=True)
-                    # Strip flag/icon prefix chars and trailing whitespace
-                    text = text.strip()
-                    return text
-        # Strategy 2: scan all headings and pick the last one before this anchor in document order
-        all_headings = soup.find_all(["h2", "h3", "h4"])
-        country = "Unknown"
-        for h in all_headings:
-            # Check if this heading comes before our anchor in the document
-            if h.find_next("a", href=True) == a_tag or a_tag in h.find_all_next("a"):
-                country = h.get_text(strip=True).strip()
-            else:
-                break
-        return country
-
     for a in soup.find_all("a", href=True):
         link_text = a.get_text(strip=True).lower()
         if not link_text.endswith("visit website"):
@@ -128,16 +100,28 @@ def extract_urls(page_url: str) -> List[Dict[str, Any]]:
         href = a["href"].strip()
         full_url = urljoin(page_url, href)
 
-        # Detect "Coming Soon" entries: href is "#", empty, or points back to the franchise page
+        # Detect "Coming Soon" entries (href is "#" or empty or points to same page)
         is_coming_soon = (
-            not href
-            or href == "#"
-            or href == page_url
-            or not full_url.startswith(("http://", "https://"))
-            or "lingua-learn.com/franchise" in full_url
+            not href or href == "#" or href == page_url or
+            not full_url.startswith(("http://", "https://")) or
+            "lingua-learn.com/franchise" in full_url
         )
 
-        country = find_country_for_anchor(a)
+        # Extract country from preceding <h3> or <h2>
+        country = "Unknown"
+        parent = a.parent
+        while parent:
+            h3 = parent.find_previous_sibling(["h2", "h3", "h4"])
+            if h3:
+                country = h3.get_text(strip=True)
+                break
+            parent = parent.parent
+        if country == "Unknown":
+            # fallback: find any heading before this anchor
+            for heading in soup.find_all(["h2", "h3", "h4"]):
+                if a in heading.find_next_siblings():
+                    country = heading.get_text(strip=True)
+                    break
 
         if is_coming_soon:
             if country not in seen:
@@ -151,10 +135,8 @@ def extract_urls(page_url: str) -> List[Dict[str, Any]]:
                 })
             continue
 
-        # Skip internal lingua-learn.com links that aren't franchise sites
         parsed = urlparse(full_url)
         clean_url = urlunparse(parsed._replace(fragment=""))
-
         if clean_url not in seen:
             seen.add(clean_url)
             entries.append({
@@ -165,15 +147,14 @@ def extract_urls(page_url: str) -> List[Dict[str, Any]]:
                 "note": ""
             })
 
-    live_count = sum(1 for e in entries if e["status"] != "COMING_SOON")
-    soon_count = sum(1 for e in entries if e["status"] == "COMING_SOON")
-    print(f"Found {len(entries)} franchise entries: {live_count} live, {soon_count} coming soon.")
+    live_count = sum(1 for e in entries if e.get("status") != "COMING_SOON")
+    print(f"Found {len(entries)} franchise entries: {live_count} live, {len(entries)-live_count} coming soon.")
     if live_count == 0:
-        print("No live franchise links extracted. Printing all anchor texts (first 50):")
+        print("No live franchise links extracted. Printing first 50 anchors for debugging:")
         for i, a in enumerate(soup.find_all("a", href=True)[:50]):
             text = a.get_text(strip=True)[:50]
             print(f"  {i+1}. Text: '{text}' -> href: {a.get('href')}")
-        sys.exit("No franchise links extracted. Check the page structure.")
+        sys.exit("No franchise links extracted. Check page structure.")
     return entries
 
 def is_parked(text: str) -> bool:
@@ -219,6 +200,9 @@ def classify_response(entry: Dict, url: str, resp: httpx.Response, final_url: st
 def check_url_accurate(entry: Dict[str, Any], client: httpx.Client,
                        args: argparse.Namespace, rate_limiter: RateLimiter) -> Dict[str, Any]:
     url = entry["url"]
+    if entry.get("status") == "COMING_SOON":
+        return entry
+
     rate_limiter.wait()
 
     parsed = urlparse(url)
