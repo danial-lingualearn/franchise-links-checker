@@ -73,7 +73,18 @@ def extract_urls(page_url: str) -> List[Dict[str, Any]]:
             context = browser.new_context(user_agent=config.HEADERS["User-Agent"])
             page = context.new_page()
             page.goto(page_url, timeout=30000, wait_until="domcontentloaded")
+            
+            # Scroll to bottom to trigger lazy loading
+            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
             page.wait_for_timeout(3000)
+            
+            # Wait for any element containing "Visit Website" to appear
+            try:
+                page.wait_for_selector("a:has-text('Visit Website')", timeout=10000)
+            except Exception:
+                print("Timeout waiting for 'Visit Website' links, but continuing...")
+            
+            # Get the full HTML after scrolling
             html = page.content()
             browser.close()
     except Exception as e:
@@ -93,6 +104,7 @@ def extract_urls(page_url: str) -> List[Dict[str, Any]]:
         if "lingua-learn.com" in full_url:
             continue
 
+        # Find country from the nearest preceding <h3>
         country = "Unknown"
         parent = a.parent
         while parent:
@@ -101,6 +113,12 @@ def extract_urls(page_url: str) -> List[Dict[str, Any]]:
                 country = h3.get_text(strip=True)
                 break
             parent = parent.parent
+        if country == "Unknown":
+            # Fallback: look for any <h3> that is near this anchor
+            for h3 in soup.find_all("h3"):
+                if a in h3.find_next_siblings():
+                    country = h3.get_text(strip=True)
+                    break
 
         parsed = urlparse(full_url)
         clean_url = urlunparse(parsed._replace(fragment=""))
@@ -116,9 +134,11 @@ def extract_urls(page_url: str) -> List[Dict[str, Any]]:
 
     print(f"Found {len(entries)} franchise links.")
     if not entries:
-        print("No 'Visit Website' links found. Printing first 20 anchors:")
-        for i, a in enumerate(soup.find_all("a", href=True)[:20]):
-            print(f"  {i+1}. Text: '{a.get_text(strip=True)[:50]}' -> href: {a.get('href')}")
+        # Print more of the page to debug
+        print("No 'Visit Website' links found. Printing all anchor texts (first 50):")
+        for i, a in enumerate(soup.find_all("a", href=True)[:50]):
+            text = a.get_text(strip=True)[:50]
+            print(f"  {i+1}. Text: '{text}' -> href: {a.get('href')}")
         sys.exit("No franchise links extracted. Check the page structure.")
     return entries
 
