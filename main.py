@@ -84,27 +84,68 @@ class RateLimiter:
 
 
 def extract_urls(page_url: str) -> List[Dict[str, Any]]:
+    # Try httpx first
+    html = None
     try:
         with httpx.Client(timeout=config.DEFAULT_TIMEOUT, headers=config.HEADERS, follow_redirects=True) as client:
             resp = client.get(page_url)
             resp.raise_for_status()
             html = resp.text
     except Exception as e:
-        sys.exit(f"ERROR fetching {page_url}: {e}")
+        print(f"HTTPX request failed: {e}")
 
+    if html:
+        entries = _parse_links_from_html(page_url, html)
+        if entries:
+            print(f"Found {len(entries)} links via HTTPX")
+            return entries
+        else:
+            print("HTTPX fetched page but found no links. Falling back to Playwright.")
+
+    # Fallback to Playwright (JavaScript rendering)
+    if not PLAYWRIGHT_AVAILABLE:
+        sys.exit("Playwright is not installed but required to extract dynamic links.")
+
+    print("Fetching page with Playwright (headless Chromium)...")
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            context = browser.new_context(user_agent=config.HEADERS["User-Agent"])
+            page = context.new_page()
+            page.goto(page_url, timeout=config.DEFAULT_TIMEOUT * 1000, wait_until="networkidle")
+            page.wait_for_timeout(2000)  # extra wait for lazy content
+            html = page.content()
+            browser.close()
+    except Exception as e:
+        sys.exit(f"Playwright failed to load page: {e}")
+
+    entries = _parse_links_from_html(page_url, html)
+    if not entries:
+        # Debug: print the page title and first 20 links for inspection
+        print("No links found even with Playwright. Page title:", page.title() if 'page' in locals() else 'unknown')
+        print("First 20 anchor texts and hrefs:")
+        soup = BeautifulSoup(html, "html.parser")
+        for i, a in enumerate(soup.find_all("a", href=True)[:20]):
+            print(f"  {i+1}. Text: '{a.get_text(strip=True)[:60]}' -> href: {a.get('href')}")
+        sys.exit("No franchise links found. Please check the HTML structure.")
+    else:
+        print(f"Found {len(entries)} links via Playwright")
+    return entries
+
+def _parse_links_from_html(page_url: str, html: str) -> List[Dict[str, Any]]:
     soup = BeautifulSoup(html, "html.parser")
     seen = set()
     entries = []
 
-    # First attempt: look for "visit website" text
     for a in soup.find_all("a", href=True):
         text = a.get_text(strip=True).lower()
+        # Look for "visit website" or similar
         if "visit website" in text:
             href = a["href"].strip()
             full_url = urljoin(page_url, href)
             if not full_url.startswith(("http://", "https://")):
                 continue
-            if "lingua-learn.com/franchise" in full_url or full_url.rstrip("/") == page_url.rstrip("/"):
+            if "lingua-learn.com" in full_url:
                 continue
             country = _extract_country(a)
             if href == "#":
@@ -117,8 +158,26 @@ def extract_urls(page_url: str) -> List[Dict[str, Any]]:
                 entries.append({"country": country, "url": clean_url, "status": None, "code": None, "note": ""})
 
     if entries:
-        print(f"Found {len(entries)} links using 'visit website' text.")
         return entries
+
+    # Fallback: any external link not on lingua-learn.com
+    for a in soup.find_all("a", href=True):
+        href = a["href"].strip()
+        full_url = urljoin(page_url, href)
+        if not full_url.startswith(("http://", "https://")):
+            continue
+        if "lingua-learn.com" in full_url:
+            continue
+        if full_url.rstrip("/") == page_url.rstrip("/"):
+            continue
+        country = _extract_country(a)
+        parsed = urlparse(full_url)
+        clean_url = urlunparse(parsed._replace(fragment=""))
+        if clean_url not in seen:
+            seen.add(clean_url)
+            entries.append({"country": country, "url": clean_url, "status": None, "code": None, "note": ""})
+
+    return entries
 
     # Fallback: collect all external links (not on lingua-learn.com)
     print("No 'visit website' links found. Falling back to all external links.")
