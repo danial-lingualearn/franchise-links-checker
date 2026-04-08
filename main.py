@@ -293,7 +293,7 @@ def send_email(file_path: str) -> None:
     msg["To"] = receiver
     msg["Subject"] = f"Franchise Links Report - {datetime.now().strftime('%d %b %Y')}"
 
-    body = "Please find attached the daily franchise link check report (CSV)."
+    body = "Please find attached the daily franchise links check report (CSV)."
     msg.attach(MIMEText(body, "plain"))
 
     try:
