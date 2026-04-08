@@ -71,16 +71,15 @@ def extract_urls(page_url: str) -> List[Dict[str, Any]]:
             browser = p.chromium.launch(headless=True)
             context = browser.new_context(user_agent=config.HEADERS["User-Agent"])
             page = context.new_page()
-            page.goto(page_url, timeout=30000, wait_until="domcontentloaded")
+            # Increase timeout to 60 seconds for slow loading
+            page.goto(page_url, timeout=60000, wait_until="domcontentloaded")
             # Scroll to bottom in steps to trigger lazy loading
             for _ in range(3):
                 page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                page.wait_for_timeout(2000)
-            # Wait for network idle after scrolling
-            page.wait_for_load_state("networkidle", timeout=10000)
-            # Ensure "Visit Website" links are present
+                page.wait_for_timeout(3000)  # wait 3 seconds after each scroll
+            # Wait for "Visit Website" links to appear (up to 15 seconds)
             try:
-                page.wait_for_selector("a:has-text('Visit Website')", timeout=10000)
+                page.wait_for_selector("a:has-text('Visit Website')", timeout=15000)
             except Exception:
                 print("Warning: 'Visit Website' links not found after waiting, but continuing...")
             html = page.content()
@@ -100,7 +99,7 @@ def extract_urls(page_url: str) -> List[Dict[str, Any]]:
         href = a["href"].strip()
         full_url = urljoin(page_url, href)
 
-        # Detect "Coming Soon" entries (href is "#" or empty or points to same page)
+        # Detect "Coming Soon" entries
         is_coming_soon = (
             not href or href == "#" or href == page_url or
             not full_url.startswith(("http://", "https://")) or
@@ -117,7 +116,6 @@ def extract_urls(page_url: str) -> List[Dict[str, Any]]:
                 break
             parent = parent.parent
         if country == "Unknown":
-            # fallback: find any heading before this anchor
             for heading in soup.find_all(["h2", "h3", "h4"]):
                 if a in heading.find_next_siblings():
                     country = heading.get_text(strip=True)
