@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Franchise Broken Links Checker – Dynamic Playwright Extraction + Email Report"""
+"""Franchise Links Checker – Dynamic Playwright Extraction + Email Report"""
 
 import csv
 import sys
@@ -24,7 +24,7 @@ from playwright.sync_api import sync_playwright
 
 class Config:
     DEFAULT_URL = "https://lingua-learn.com/franchise/"
-    DEFAULT_OUTPUT_BASE = "Franchise_Broken_Links_Report"
+    DEFAULT_OUTPUT_BASE = "Franchise_Links_Report"
     DEFAULT_TIMEOUT = 15
     DEFAULT_MAX_WORKERS = 5
     DEFAULT_RETRIES = 2

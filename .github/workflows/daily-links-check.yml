@@ -1,4 +1,4 @@
-name: Daily Franchise Link Check
+name: Daily Franchise Links Check
 
 on:
   schedule:
@@ -29,5 +29,5 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: franchise-report
-        path: Franchise_Broken_Links_Report_*.csv
+        path: Franchise_Links_Report_*.csv
         retention-days: 7
