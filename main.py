@@ -94,34 +94,67 @@ def extract_urls(page_url: str) -> List[Dict[str, Any]]:
     seen = set()
     entries = []
 
+    def find_country_for_anchor(a_tag) -> str:
+        """Walk up the DOM tree looking for a heading (h2/h3/h4) that names the country."""
+        # Strategy 1: find the closest preceding sibling heading anywhere in the ancestor chain
+        node = a_tag
+        for _ in range(10):  # limit traversal depth
+            node = node.parent
+            if node is None:
+                break
+            for heading_tag in ("h2", "h3", "h4"):
+                h = node.find_previous_sibling(heading_tag)
+                if h:
+                    text = h.get_text(strip=True)
+                    # Strip flag/icon prefix chars and trailing whitespace
+                    text = text.strip()
+                    return text
+        # Strategy 2: scan all headings and pick the last one before this anchor in document order
+        all_headings = soup.find_all(["h2", "h3", "h4"])
+        country = "Unknown"
+        for h in all_headings:
+            # Check if this heading comes before our anchor in the document
+            if h.find_next("a", href=True) == a_tag or a_tag in h.find_all_next("a"):
+                country = h.get_text(strip=True).strip()
+            else:
+                break
+        return country
+
     for a in soup.find_all("a", href=True):
-        if a.get_text(strip=True).lower() != "visit website":
+        link_text = a.get_text(strip=True).lower()
+        if not link_text.endswith("visit website"):
             continue
+
         href = a["href"].strip()
         full_url = urljoin(page_url, href)
-        if not full_url.startswith(("http://", "https://")):
-            continue
-        if "lingua-learn.com" in full_url:
+
+        # Detect "Coming Soon" entries: href is "#", empty, or points back to the franchise page
+        is_coming_soon = (
+            not href
+            or href == "#"
+            or href == page_url
+            or not full_url.startswith(("http://", "https://"))
+            or "lingua-learn.com/franchise" in full_url
+        )
+
+        country = find_country_for_anchor(a)
+
+        if is_coming_soon:
+            if country not in seen:
+                seen.add(country)
+                entries.append({
+                    "country": country,
+                    "url": "",
+                    "status": "COMING_SOON",
+                    "code": None,
+                    "note": "No live URL yet"
+                })
             continue
 
-        # Find country from the nearest preceding <h3>
-        country = "Unknown"
-        parent = a.parent
-        while parent:
-            h3 = parent.find_previous_sibling("h3")
-            if h3:
-                country = h3.get_text(strip=True)
-                break
-            parent = parent.parent
-        if country == "Unknown":
-            # Fallback: look for any <h3> that is near this anchor
-            for h3 in soup.find_all("h3"):
-                if a in h3.find_next_siblings():
-                    country = h3.get_text(strip=True)
-                    break
-
+        # Skip internal lingua-learn.com links that aren't franchise sites
         parsed = urlparse(full_url)
         clean_url = urlunparse(parsed._replace(fragment=""))
+
         if clean_url not in seen:
             seen.add(clean_url)
             entries.append({
@@ -132,10 +165,11 @@ def extract_urls(page_url: str) -> List[Dict[str, Any]]:
                 "note": ""
             })
 
-    print(f"Found {len(entries)} franchise links.")
-    if not entries:
-        # Print more of the page to debug
-        print("No 'Visit Website' links found. Printing all anchor texts (first 50):")
+    live_count = sum(1 for e in entries if e["status"] != "COMING_SOON")
+    soon_count = sum(1 for e in entries if e["status"] == "COMING_SOON")
+    print(f"Found {len(entries)} franchise entries: {live_count} live, {soon_count} coming soon.")
+    if live_count == 0:
+        print("No live franchise links extracted. Printing all anchor texts (first 50):")
         for i, a in enumerate(soup.find_all("a", href=True)[:50]):
             text = a.get_text(strip=True)[:50]
             print(f"  {i+1}. Text: '{text}' -> href: {a.get('href')}")
