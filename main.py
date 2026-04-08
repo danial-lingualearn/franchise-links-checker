@@ -90,31 +90,66 @@ def extract_urls(page_url: str) -> List[Dict[str, Any]]:
             resp.raise_for_status()
             html = resp.text
     except Exception as e:
-        sys.exit(f"ERROR: {e}")
+        sys.exit(f"ERROR fetching {page_url}: {e}")
 
     soup = BeautifulSoup(html, "html.parser")
     seen = set()
     entries = []
 
+    # First attempt: look for "visit website" text
     for a in soup.find_all("a", href=True):
         text = a.get_text(strip=True).lower()
-        if "visit website" not in text:
-            continue
+        if "visit website" in text:
+            href = a["href"].strip()
+            full_url = urljoin(page_url, href)
+            if not full_url.startswith(("http://", "https://")):
+                continue
+            if "lingua-learn.com/franchise" in full_url or full_url.rstrip("/") == page_url.rstrip("/"):
+                continue
+            country = _extract_country(a)
+            if href == "#":
+                entries.append({"country": country, "url": full_url, "status": "COMING_SOON", "code": None, "note": "COMING_SOON"})
+                continue
+            parsed = urlparse(full_url)
+            clean_url = urlunparse(parsed._replace(fragment=""))
+            if clean_url not in seen:
+                seen.add(clean_url)
+                entries.append({"country": country, "url": clean_url, "status": None, "code": None, "note": ""})
+
+    if entries:
+        print(f"Found {len(entries)} links using 'visit website' text.")
+        return entries
+
+    # Fallback: collect all external links (not on lingua-learn.com)
+    print("No 'visit website' links found. Falling back to all external links.")
+    for a in soup.find_all("a", href=True):
         href = a["href"].strip()
         full_url = urljoin(page_url, href)
         if not full_url.startswith(("http://", "https://")):
             continue
-        if "lingua-learn.com/franchise" in full_url or full_url.rstrip("/") == page_url.rstrip("/"):
+        # Exclude links that stay on the same domain
+        if "lingua-learn.com" in full_url:
+            continue
+        # Exclude page itself
+        if full_url.rstrip("/") == page_url.rstrip("/"):
             continue
         country = _extract_country(a)
-        if href == "#":
-            entries.append({"country": country, "url": full_url, "status": "COMING_SOON", "code": None, "note": "COMING_SOON"})
-            continue
+        text_preview = a.get_text(strip=True)[:50]
+        print(f"Found external link: {text_preview} -> {full_url}")
         parsed = urlparse(full_url)
         clean_url = urlunparse(parsed._replace(fragment=""))
         if clean_url not in seen:
             seen.add(clean_url)
             entries.append({"country": country, "url": clean_url, "status": None, "code": None, "note": ""})
+
+    if not entries:
+        # Last resort: print some HTML context for debugging
+        print("No external links found. Printing first 10 anchor texts:")
+        for i, a in enumerate(soup.find_all("a", href=True)[:10]):
+            print(f"  {i+1}. Text: '{a.get_text(strip=True)}' -> href: {a.get('href')}")
+    else:
+        print(f"Found {len(entries)} external links as fallback.")
+
     return entries
 
 
