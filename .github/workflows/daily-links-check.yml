@@ -2,7 +2,7 @@ name: Daily Franchise Link Check
 
 on:
   schedule:
-    - cron: '0 3 * * *'
+    - cron: '0 0 * * *'  # midnight UTC = 7:00 AM WIB
   workflow_dispatch:
 
 jobs:
