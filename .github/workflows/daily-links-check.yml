@@ -1,4 +1,4 @@
-name: Daily Franchise Link Check
+name: Daily Franchise Links Check
 
 on:
   schedule:
