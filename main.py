@@ -5,6 +5,7 @@
 import csv
 import sys
 import time
+import random
 import threading
 import argparse
 import os
@@ -25,13 +26,21 @@ from playwright.sync_api import sync_playwright
 class Config:
     DEFAULT_URL = "https://lingua-learn.com/franchise/"
     DEFAULT_OUTPUT_BASE = "Franchise_Links_Report"
-    DEFAULT_TIMEOUT = 15
-    DEFAULT_MAX_WORKERS = 5
+    DEFAULT_TIMEOUT = 20
+    DEFAULT_MAX_WORKERS = 2
     DEFAULT_RETRIES = 2
-    DEFAULT_RETRY_DELAY = 2
-    DEFAULT_RATE_LIMIT = 0.5
+    DEFAULT_RETRY_DELAY = 3
+    DEFAULT_RATE_LIMIT = 0.3
     MIN_CONTENT_LENGTH = 200
     BRAND_KEYWORDS = ["lingua", "learn", "language"]
+    BOT_DETECTION_PHRASES = ["bot verification", "captcha", "access denied", "please verify", "are you human"]
+    USER_AGENTS = [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Safari/605.1.15",
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    ]
     HEADERS = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
@@ -63,6 +72,8 @@ class RateLimiter:
                 self.tokens = 0.0
             else:
                 self.tokens -= 1.0
+        # Random jitter to avoid bot detection from predictable timing
+        time.sleep(random.uniform(1.5, 4.0))
 
 def extract_urls(page_url: str) -> List[Dict[str, Any]]:
     print(f"Loading page with Playwright: {page_url}")
@@ -160,6 +171,10 @@ def is_parked(text: str) -> bool:
     parked_phrases = ["domain for sale", "parked", "this domain is for sale", "buy this domain"]
     return any(phrase in low for phrase in parked_phrases)
 
+def is_bot_blocked(title: str, body_text: str) -> bool:
+    combined = (title + " " + body_text).lower()
+    return any(phrase in combined for phrase in config.BOT_DETECTION_PHRASES)
+
 def classify_response(entry: Dict, url: str, resp: httpx.Response, final_url: str, title: str, body_text: str) -> Dict:
     original_domain = urlparse(url).netloc
     final_domain = urlparse(final_url).netloc
@@ -198,18 +213,29 @@ def classify_response(entry: Dict, url: str, resp: httpx.Response, final_url: st
 def check_with_playwright(url: str, timeout: int):
     try:
         with sync_playwright() as p:
+            ua = random.choice(config.USER_AGENTS)
             browser = p.chromium.launch(headless=True)
-            context = browser.new_context(user_agent=config.HEADERS["User-Agent"])
+            context = browser.new_context(
+                user_agent=ua,
+                locale="en-US",
+                timezone_id="America/New_York",
+                viewport={"width": 1280, "height": 800},
+            )
             page = context.new_page()
-            response = page.goto(url, timeout=timeout * 1000, wait_until="domcontentloaded")
+            response = page.goto(url, timeout=timeout * 1000, wait_until="networkidle")
+            page.wait_for_timeout(3000)  # extra settle time after network idle
             status = response.status if response else 0
             title = page.title()
             body_text = page.locator("body").inner_text()
             browser.close()
             if is_parked(body_text) or is_parked(title):
-                return status, "PARKED", f"Parked domain (title: {title})"
-            if status < 400:
+                return status, "PARKED", f"Parked domain | Title: {title}"
+            if is_bot_blocked(title, body_text):
+                return status, "BOT_BLOCKED", f"Bot/CAPTCHA page detected | Title: {title}"
+            if status < 400 and len(body_text.strip()) >= config.MIN_CONTENT_LENGTH:
                 return status, "OK", f"Browser-rendered | Title: {title}"
+            if status < 400:
+                return status, "EMPTY_PAGE", f"Browser-rendered but empty | Title: {title}"
             return status, f"HTTP_{status}", f"Playwright fallback | Title: {title}"
     except Exception as e:
         return None, "BROWSER_ERROR", str(e)[:80]
@@ -222,6 +248,9 @@ def check_url_accurate(entry: Dict[str, Any], client: httpx.Client,
         return entry
 
     rate_limiter.wait()
+
+    # Rotate User-Agent per request
+    rotated_headers = {**config.HEADERS, "User-Agent": random.choice(config.USER_AGENTS)}
 
     parsed = urlparse(url)
     urls_to_try = [url]
@@ -237,7 +266,8 @@ def check_url_accurate(entry: Dict[str, Any], client: httpx.Client,
     for attempt in range(args.retries + 1):
         for try_url in urls_to_try:
             try:
-                resp = client.get(try_url, timeout=args.timeout, follow_redirects=True)
+                resp = client.get(try_url, timeout=args.timeout, follow_redirects=True,
+                                  headers=rotated_headers)
                 code = resp.status_code
                 final_url = str(resp.url)
 
@@ -251,6 +281,11 @@ def check_url_accurate(entry: Dict[str, Any], client: httpx.Client,
                         if is_parked(body_text) or is_parked(title):
                             return {**entry, "status": "PARKED", "code": code, "note": "Domain parked / for sale"}
 
+                        if is_bot_blocked(title, body_text):
+                            # Immediately retry with Playwright for bot-blocked pages
+                            pw_code, pw_label, pw_note = check_with_playwright(url, args.timeout)
+                            return {**entry, "status": pw_label, "code": pw_code, "note": pw_note}
+
                         result = classify_response(entry, try_url, resp, final_url, title, body_text)
                         if result.get("status") == "EMPTY_PAGE":
                             pw_code, pw_label, pw_note = check_with_playwright(url, args.timeout)
@@ -263,6 +298,11 @@ def check_url_accurate(entry: Dict[str, Any], client: httpx.Client,
                 last_code = code
                 if code == 403:
                     last_label = "FORBIDDEN"
+                    # Try Playwright immediately on 403 — likely bot protection
+                    pw_code, pw_label, pw_note = check_with_playwright(url, args.timeout)
+                    if pw_label not in ("BROWSER_ERROR", "BOT_BLOCKED"):
+                        return {**entry, "status": pw_label, "code": pw_code, "note": pw_note}
+                    last_note = f"Status 403 | Playwright: {pw_note}"
                 elif code == 404:
                     last_label = "NOT_FOUND"
                 elif code >= 500:
