@@ -195,6 +195,26 @@ def classify_response(entry: Dict, url: str, resp: httpx.Response, final_url: st
     final_note = " | ".join(notes) if notes else "No additional info"
     return {**entry, "status": status_label, "code": code, "note": final_note}
 
+def check_with_playwright(url: str, timeout: int):
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            context = browser.new_context(user_agent=config.HEADERS["User-Agent"])
+            page = context.new_page()
+            response = page.goto(url, timeout=timeout * 1000, wait_until="domcontentloaded")
+            status = response.status if response else 0
+            title = page.title()
+            body_text = page.locator("body").inner_text()
+            browser.close()
+            if is_parked(body_text) or is_parked(title):
+                return status, "PARKED", f"Parked domain (title: {title})"
+            if status < 400:
+                return status, "OK", f"Browser-rendered | Title: {title}"
+            return status, f"HTTP_{status}", f"Playwright fallback | Title: {title}"
+    except Exception as e:
+        return None, "BROWSER_ERROR", str(e)[:80]
+
+
 def check_url_accurate(entry: Dict[str, Any], client: httpx.Client,
                        args: argparse.Namespace, rate_limiter: RateLimiter) -> Dict[str, Any]:
     url = entry["url"]
@@ -231,7 +251,12 @@ def check_url_accurate(entry: Dict[str, Any], client: httpx.Client,
                         if is_parked(body_text) or is_parked(title):
                             return {**entry, "status": "PARKED", "code": code, "note": "Domain parked / for sale"}
 
-                        return classify_response(entry, try_url, resp, final_url, title, body_text)
+                        result = classify_response(entry, try_url, resp, final_url, title, body_text)
+                        if result.get("status") == "EMPTY_PAGE":
+                            pw_code, pw_label, pw_note = check_with_playwright(url, args.timeout)
+                            if pw_label == "OK":
+                                return {**entry, "status": "OK", "code": pw_code, "note": pw_note}
+                        return result
                     else:
                         return {**entry, "status": "OK", "code": code, "note": f"Content-Type: {content_type}"}
 
