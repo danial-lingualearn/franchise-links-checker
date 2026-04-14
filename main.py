@@ -62,41 +62,44 @@ class RateLimiter:
         with self.lock:
             now = time.monotonic()
             elapsed = now - self.last_time
-            self.tokens += elapsed * self.rate
-            if self.tokens > 1.0:
-                self.tokens = 1.0
+            self.tokens = min(1.0, self.tokens + elapsed * self.rate)
             self.last_time = now
             if self.tokens < 1.0:
                 sleep_time = (1.0 - self.tokens) / self.rate
                 time.sleep(sleep_time)
-                self.tokens = 0.0
-            else:
-                self.tokens -= 1.0
+                now_after = time.monotonic()
+                elapsed_after = now_after - self.last_time
+                self.tokens = min(1.0, self.tokens + elapsed_after * self.rate)
+                self.last_time = now_after
+            self.tokens -= 1.0
         # Random jitter to avoid bot detection from predictable timing
         time.sleep(random.uniform(1.5, 4.0))
 
 def extract_urls(page_url: str) -> List[Dict[str, Any]]:
     print(f"Loading page with Playwright: {page_url}")
+    html = ""
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
-            context = browser.new_context(user_agent=config.HEADERS["User-Agent"])
-            page = context.new_page()
-            # Increase timeout to 60 seconds for slow loading
-            page.goto(page_url, timeout=60000, wait_until="domcontentloaded")
-            # Scroll to bottom in steps to trigger lazy loading
-            for _ in range(3):
-                page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                page.wait_for_timeout(3000)  # wait 3 seconds after each scroll
-            # Wait for "Visit Website" links to appear (up to 15 seconds)
             try:
-                page.wait_for_selector("a:has-text('Visit Website')", timeout=15000)
-            except Exception:
-                print("Warning: 'Visit Website' links not found after waiting, but continuing...")
-            html = page.content()
-            browser.close()
+                context = browser.new_context(user_agent=config.HEADERS["User-Agent"])
+                page = context.new_page()
+                # Increase timeout to 60 seconds for slow loading
+                page.goto(page_url, timeout=60000, wait_until="domcontentloaded")
+                # Scroll to bottom in steps to trigger lazy loading
+                for _ in range(3):
+                    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                    page.wait_for_timeout(3000)  # wait 3 seconds after each scroll
+                # Wait for "Visit Website" links to appear (up to 15 seconds)
+                try:
+                    page.wait_for_selector("a:has-text('Visit Website')", timeout=15000)
+                except (TimeoutError, RuntimeError):
+                    print("Warning: 'Visit Website' links not found after waiting, but continuing...")
+                html = page.content()
+            finally:
+                browser.close()
     except Exception as e:
-        sys.exit(f"Playwright failed to load page: {e}")
+        raise RuntimeError(f"Playwright failed to load page: {e}") from e
 
     soup = BeautifulSoup(html, "html.parser")
     seen = set()
@@ -139,7 +142,7 @@ def extract_urls(page_url: str) -> List[Dict[str, Any]]:
                     "country": country,
                     "url": "",
                     "status": "COMING_SOON",
-                    "code": None,
+                    "code": 0,
                     "note": "No live URL yet"
                 })
             continue
@@ -163,7 +166,7 @@ def extract_urls(page_url: str) -> List[Dict[str, Any]]:
         for i, a in enumerate(soup.find_all("a", href=True)[:50]):
             text = a.get_text(strip=True)[:50]
             print(f"  {i+1}. Text: '{text}' -> href: {a.get('href')}")
-        sys.exit("No franchise links extracted. Check page structure.")
+        raise RuntimeError("No franchise links extracted. Check page structure.")
     return entries
 
 def is_parked(text: str) -> bool:
@@ -215,33 +218,35 @@ def check_with_playwright(url: str, timeout: int):
         with sync_playwright() as p:
             ua = random.choice(config.USER_AGENTS)
             browser = p.chromium.launch(headless=True)
-            context = browser.new_context(
-                user_agent=ua,
-                locale="en-US",
-                timezone_id="America/New_York",
-                viewport={"width": 1280, "height": 800},
-            )
-            page = context.new_page()
-            response = page.goto(url, timeout=timeout * 1000, wait_until="networkidle")
-            page.wait_for_timeout(3000)  # extra settle time after network idle
-            status = response.status if response else 0
-            title = page.title()
-            body_text = page.locator("body").inner_text()
-            browser.close()
-            if is_parked(body_text) or is_parked(title):
-                return status, "PARKED", f"Parked domain | Title: {title}"
-            if is_bot_blocked(title, body_text):
-                return status, "BOT_BLOCKED", f"Bot/CAPTCHA page detected | Title: {title}"
-            if status < 400 and len(body_text.strip()) >= config.MIN_CONTENT_LENGTH:
-                return status, "OK", f"Browser-rendered | Title: {title}"
-            if status < 400:
-                return status, "EMPTY_PAGE", f"Browser-rendered but empty | Title: {title}"
-            return status, f"HTTP_{status}", f"Playwright fallback | Title: {title}"
-    except Exception as e:
+            try:
+                context = browser.new_context(
+                    user_agent=ua,
+                    locale="en-US",
+                    timezone_id="America/New_York",
+                    viewport={"width": 1280, "height": 800},
+                )
+                page = context.new_page()
+                response = page.goto(url, timeout=timeout * 1000, wait_until="networkidle")
+                page.wait_for_timeout(3000)  # extra settle time after network idle
+                status = response.status if response else 0
+                title = page.title()
+                body_text = page.locator("body").inner_text()
+                if is_parked(body_text) or is_parked(title):
+                    return status, "PARKED", f"Parked domain | Title: {title}"
+                if is_bot_blocked(title, body_text):
+                    return status, "BOT_BLOCKED", f"Bot/CAPTCHA page detected | Title: {title}"
+                if status < 400 and len(body_text.strip()) >= config.MIN_CONTENT_LENGTH:
+                    return status, "OK", f"Browser-rendered | Title: {title}"
+                if status < 400:
+                    return status, "EMPTY_PAGE", f"Browser-rendered but empty | Title: {title}"
+                return status, f"HTTP_{status}", f"Playwright fallback | Title: {title}"
+            finally:
+                browser.close()
+    except (RuntimeError, OSError, ValueError) as e:
         return None, "BROWSER_ERROR", str(e)[:80]
 
 
-def check_url_accurate(entry: Dict[str, Any], client: httpx.Client,
+def check_url_accurate(entry: Dict[str, Any],
                        args: argparse.Namespace, rate_limiter: RateLimiter) -> Dict[str, Any]:
     url = entry["url"]
     if entry.get("status") == "COMING_SOON":
@@ -255,9 +260,9 @@ def check_url_accurate(entry: Dict[str, Any], client: httpx.Client,
     parsed = urlparse(url)
     urls_to_try = [url]
     if parsed.scheme == "http":
-        urls_to_try.append(f"https://{parsed.netloc}{parsed.path}")
+        urls_to_try.append(urlunparse(parsed._replace(scheme="https")))
     elif parsed.scheme == "https":
-        urls_to_try.append(f"http://{parsed.netloc}{parsed.path}")
+        urls_to_try.append(urlunparse(parsed._replace(scheme="http")))
 
     last_code = None
     last_label = "ERROR"
@@ -266,8 +271,9 @@ def check_url_accurate(entry: Dict[str, Any], client: httpx.Client,
     for attempt in range(args.retries + 1):
         for try_url in urls_to_try:
             try:
-                resp = client.get(try_url, timeout=args.timeout, follow_redirects=True,
-                                  headers=rotated_headers)
+                with httpx.Client(http2=True, follow_redirects=True, headers=rotated_headers,
+                                  timeout=args.timeout) as client:
+                    resp = client.get(try_url)
                 code = resp.status_code
                 final_url = str(resp.url)
 
@@ -332,16 +338,30 @@ def check_url_accurate(entry: Dict[str, Any], client: httpx.Client,
 
     return {**entry, "status": last_label, "code": last_code, "note": last_note or entry.get("note", "")}
 
+def positive_int(value: str) -> int:
+    ivalue = int(value)
+    if ivalue <= 0:
+        raise argparse.ArgumentTypeError(f"{value} is not a positive integer")
+    return ivalue
+
+
+def non_negative_float(value: str) -> float:
+    fvalue = float(value)
+    if fvalue < 0:
+        raise argparse.ArgumentTypeError(f"{value} is not a non-negative number")
+    return fvalue
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Check franchise links – advanced classification.")
     parser.add_argument("--url", default=config.DEFAULT_URL)
     parser.add_argument("--output", default=None)
-    parser.add_argument("--timeout", type=int, default=config.DEFAULT_TIMEOUT)
-    parser.add_argument("--workers", type=int, default=config.DEFAULT_MAX_WORKERS)
-    parser.add_argument("--retries", type=int, default=config.DEFAULT_RETRIES)
-    parser.add_argument("--rate-limit", type=float, default=config.DEFAULT_RATE_LIMIT)
-    parser.add_argument("--retry-delay", type=float, dest="retry_delay", default=config.DEFAULT_RETRY_DELAY)
-    args, _ = parser.parse_known_args()
+    parser.add_argument("--timeout", type=positive_int, default=config.DEFAULT_TIMEOUT)
+    parser.add_argument("--workers", type=positive_int, default=config.DEFAULT_MAX_WORKERS)
+    parser.add_argument("--retries", type=non_negative_float, default=config.DEFAULT_RETRIES)
+    parser.add_argument("--rate-limit", type=non_negative_float, default=config.DEFAULT_RATE_LIMIT)
+    parser.add_argument("--retry-delay", type=non_negative_float, dest="retry_delay", default=config.DEFAULT_RETRY_DELAY)
+    args = parser.parse_args()
     return args
 
 def send_email(file_path: str) -> None:
@@ -368,18 +388,20 @@ def send_email(file_path: str) -> None:
             encoders.encode_base64(part)
             part.add_header("Content-Disposition", f"attachment; filename={os.path.basename(file_path)}")
             msg.attach(part)
-    except Exception as e:
+    except (OSError, IOError) as e:
         print(f"Failed to attach file: {e}")
         return
 
+    smtp_host = os.environ.get("SMTP_HOST", "smtp.gmail.com")
+    smtp_port = int(os.environ.get("SMTP_PORT", "587"))
     try:
-        server = smtplib.SMTP("smtp.gmail.com", 587)
+        server = smtplib.SMTP(smtp_host, smtp_port)
         server.starttls()
         server.login(sender, password)
         server.send_message(msg)
         server.quit()
         print(f"Email sent to {receiver}")
-    except Exception as e:
+    except (smtplib.SMTPException, ConnectionError, TimeoutError) as e:
         print(f"Failed to send email: {e}")
 
 def run() -> None:
@@ -391,17 +413,15 @@ def run() -> None:
     results = list(soon)
     rate_limiter = RateLimiter(args.rate_limit)
 
-    with httpx.Client(http2=True, follow_redirects=True, headers=config.HEADERS,
-                      limits=httpx.Limits(max_keepalive_connections=5)) as client:
-        with ThreadPoolExecutor(max_workers=args.workers) as executor:
-            futures = {executor.submit(check_url_accurate, e, client, args, rate_limiter): e for e in live}
-            for future in as_completed(futures):
-                try:
-                    result = future.result()
-                except Exception as exc:
-                    entry = futures[future]
-                    result = {**entry, "status": "UNHANDLED_ERROR", "code": None, "note": str(exc)[:100]}
-                results.append(result)
+    with ThreadPoolExecutor(max_workers=args.workers) as executor:
+        futures = {executor.submit(check_url_accurate, e, args, rate_limiter): e for e in live}
+        for future in as_completed(futures):
+            try:
+                result = future.result()
+            except (RuntimeError, OSError, ValueError) as exc:
+                entry = futures[future]
+                result = {**entry, "status": "UNHANDLED_ERROR", "code": 0, "note": str(exc)[:100]}
+            results.append(result)
 
     if args.output:
         output_file = args.output
