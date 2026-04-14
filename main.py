@@ -222,8 +222,12 @@ def check_with_playwright(url: str, timeout: int):
                 viewport={"width": 1280, "height": 800},
             )
             page = context.new_page()
-            response = page.goto(url, timeout=timeout * 1000, wait_until="networkidle")
-            page.wait_for_timeout(3000)  # extra settle time after network idle
+            response = page.goto(url, timeout=timeout * 1000, wait_until="domcontentloaded")
+            try:
+                page.wait_for_load_state("networkidle", timeout=10000)
+            except Exception:
+                pass  # networkidle may never fire on some sites — continue anyway
+            page.wait_for_timeout(5000)  # longer settle time for JS-rendered content
             status = response.status if response else 0
             title = page.title()
             body_text = page.locator("body").inner_text()
@@ -282,7 +286,6 @@ def check_url_accurate(entry: Dict[str, Any], client: httpx.Client,
                             return {**entry, "status": "PARKED", "code": code, "note": "Domain parked / for sale"}
 
                         if is_bot_blocked(title, body_text):
-                            # Immediately retry with Playwright for bot-blocked pages
                             pw_code, pw_label, pw_note = check_with_playwright(url, args.timeout)
                             return {**entry, "status": pw_label, "code": pw_code, "note": pw_note}
 
@@ -291,9 +294,19 @@ def check_url_accurate(entry: Dict[str, Any], client: httpx.Client,
                             pw_code, pw_label, pw_note = check_with_playwright(url, args.timeout)
                             if pw_label == "OK":
                                 return {**entry, "status": "OK", "code": pw_code, "note": pw_note}
+                            return {**entry, "status": "EMPTY_PAGE", "code": result.get("code"),
+                                    "note": f"{result.get('note')} | Playwright also empty: {pw_note}"}
                         return result
                     else:
-                        return {**entry, "status": "OK", "code": code, "note": f"Content-Type: {content_type}"}
+                        # No text/html content-type (or missing) — could be 202 holding page
+                        # Always try Playwright to get the real rendered content
+                        pw_code, pw_label, pw_note = check_with_playwright(url, args.timeout)
+                        if pw_label in ("OK", "REDIRECT_OTHER", "REDIRECT_MAIN", "BRAND_MISMATCH"):
+                            return {**entry, "status": pw_label, "code": pw_code, "note": pw_note}
+                        if content_type:
+                            return {**entry, "status": "OK", "code": code, "note": f"Content-Type: {content_type}"}
+                        return {**entry, "status": "EMPTY_PAGE", "code": code,
+                                "note": f"No content-type header | Playwright: {pw_note}"}
 
                 last_code = code
                 if code == 403:
