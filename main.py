@@ -226,11 +226,24 @@ def check_with_playwright(url: str, timeout: int):
                     viewport={"width": 1280, "height": 800},
                 )
                 page = context.new_page()
-                response = page.goto(url, timeout=timeout * 1000, wait_until="networkidle")
-                page.wait_for_timeout(3000)  # extra settle time after network idle
+                # Use domcontentloaded so goto() resolves before JS redirects fire;
+                # then wait for networkidle separately with a bounded timeout.
+                response = page.goto(url, timeout=timeout * 1000, wait_until="domcontentloaded")
+                try:
+                    page.wait_for_load_state("networkidle", timeout=10000)
+                except Exception:
+                    pass  # heavy pages may never reach networkidle; proceed anyway
+                page.wait_for_timeout(2000)  # extra settle after network quiet
                 status = response.status if response else 0
-                title = page.title()
-                body_text = page.locator("body").inner_text()
+                # Wrap extraction in a retry: a JS redirect after networkidle can
+                # destroy the execution context between wait and title().
+                try:
+                    title = page.title()
+                    body_text = page.locator("body").inner_text()
+                except Exception:
+                    page.wait_for_timeout(2000)
+                    title = page.title()
+                    body_text = page.locator("body").inner_text()
                 if is_parked(body_text) or is_parked(title):
                     return status, "PARKED", f"Parked domain | Title: {title}"
                 if is_bot_blocked(title, body_text):
@@ -242,7 +255,7 @@ def check_with_playwright(url: str, timeout: int):
                 return status, f"HTTP_{status}", f"Playwright fallback | Title: {title}"
             finally:
                 browser.close()
-    except (RuntimeError, OSError, ValueError) as e:
+    except Exception as e:
         return None, "BROWSER_ERROR", str(e)[:80]
 
 
