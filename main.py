@@ -16,13 +16,17 @@ from email.mime.base import MIMEBase
 from email import encoders
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Tuple, Any
 from urllib.parse import urljoin, urlparse, urlunparse
 
 import httpx
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
 
 class Config:
     DEFAULT_URL = "https://lingua-learn.com/franchise/"
@@ -45,7 +49,6 @@ class Config:
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Safari/605.1.15",
         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
     ]
-    # Full browser-like headers (reduces bot-detection on httpx requests)
     HEADERS = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
@@ -66,10 +69,6 @@ class Config:
 
 config = Config()
 
-
-# ---------------------------------------------------------------------------
-# Maintenance phrases (from notebook – missing in original main.py)
-# ---------------------------------------------------------------------------
 MAINTENANCE_PHRASES = [
     "scheduled maintenance",
     "down for maintenance",
@@ -80,6 +79,10 @@ MAINTENANCE_PHRASES = [
     "coming soon",
 ]
 
+
+# ---------------------------------------------------------------------------
+# Rate limiter
+# ---------------------------------------------------------------------------
 
 class RateLimiter:
     def __init__(self, rate: float):
@@ -97,15 +100,14 @@ class RateLimiter:
             self.tokens += elapsed * self.rate
             if self.tokens > 1.0:
                 self.tokens = 1.0
-            self.last_time = now          # update BEFORE potential sleep
+            self.last_time = now
             if self.tokens < 1.0:
                 sleep_time = (1.0 - self.tokens) / self.rate
                 time.sleep(sleep_time)
                 self.tokens = 0.0
-                self.last_time = time.monotonic()   # update AFTER sleep too
+                self.last_time = time.monotonic()
             else:
                 self.tokens -= 1.0
-        # Random jitter to avoid bot detection from predictable timing
         time.sleep(random.uniform(1.5, 4.0))
 
 
@@ -115,25 +117,23 @@ class RateLimiter:
 
 def is_parked(text: str) -> bool:
     low = text.lower()
-    parked_phrases = [
+    return any(p in low for p in [
         "domain for sale", "parked", "this domain is for sale",
         "buy this domain", "domain name is for sale",
-    ]
-    return any(phrase in low for phrase in parked_phrases)
+    ])
 
 
 def is_maintenance(text: str) -> bool:
-    low = text.lower()
-    return any(phrase in low for phrase in MAINTENANCE_PHRASES)
+    return any(p in text.lower() for p in MAINTENANCE_PHRASES)
 
 
 def is_bot_blocked(title: str, body_text: str) -> bool:
     combined = (title + " " + body_text).lower()
-    return any(phrase in combined for phrase in config.BOT_DETECTION_PHRASES)
+    return any(p in combined for p in config.BOT_DETECTION_PHRASES)
 
 
 # ---------------------------------------------------------------------------
-# Page extraction
+# Page extraction  (Playwright, no COMING_SOON dedup — notebook behaviour)
 # ---------------------------------------------------------------------------
 
 def extract_urls(page_url: str) -> List[Dict[str, Any]]:
@@ -146,14 +146,13 @@ def extract_urls(page_url: str) -> List[Dict[str, Any]]:
                 context = browser.new_context(user_agent=config.HEADERS["User-Agent"])
                 page = context.new_page()
                 page.goto(page_url, timeout=60000, wait_until="domcontentloaded")
-                # Scroll to trigger lazy-loaded franchise cards
                 for _ in range(3):
                     page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                     page.wait_for_timeout(3000)
                 try:
                     page.wait_for_selector("a:has-text('Visit Website')", timeout=15000)
-                except (TimeoutError, RuntimeError):
-                    print("Warning: 'Visit Website' links not found after waiting, but continuing...")
+                except Exception:
+                    print("Warning: 'Visit Website' links not found after waiting, continuing...")
                 html = page.content()
             finally:
                 browser.close()
@@ -165,49 +164,38 @@ def extract_urls(page_url: str) -> List[Dict[str, Any]]:
     entries = []
 
     for a in soup.find_all("a", href=True):
-        link_text = a.get_text(strip=True).lower()
-        if not link_text.endswith("visit website"):
+        if not a.get_text(strip=True).lower().endswith("visit website"):
             continue
 
         href = a["href"].strip()
+        country = _extract_country(a)
 
-        # Check for anchor/empty href BEFORE urljoin to avoid resolving "#" into a full URL
+        # Bare anchor → COMING_SOON, intentionally no dedup (notebook behaviour)
         if not href or href == "#":
-            country = _extract_country(a)
-            # Deduplicate COMING_SOON by country to prevent duplicate rows
-            key = f"COMING_SOON::{country}"
-            if key not in seen:
-                seen.add(key)
-                entries.append({
-                    "country": country,
-                    "url": "",
-                    "status": "COMING_SOON",
-                    "code": 0,
-                    "note": "No live URL yet",
-                })
+            entries.append({
+                "country": country,
+                "url": "#",
+                "status": "COMING_SOON",
+                "code": None,
+                "note": "COMING_SOON",
+            })
             continue
 
         full_url = urljoin(page_url, href)
 
-        is_coming_soon = (
-            href == page_url or
-            not full_url.startswith(("http://", "https://")) or
-            "lingua-learn.com/franchise" in full_url
-        )
-
-        country = _extract_country(a)
-
-        if is_coming_soon:
-            key = f"COMING_SOON::{country}"
-            if key not in seen:
-                seen.add(key)
-                entries.append({
-                    "country": country,
-                    "url": "",
-                    "status": "COMING_SOON",
-                    "code": 0,
-                    "note": "No live URL yet",
-                })
+        # Internal / self link → also COMING_SOON, no dedup
+        if (
+            href == page_url
+            or not full_url.startswith(("http://", "https://"))
+            or "lingua-learn.com/franchise" in full_url
+        ):
+            entries.append({
+                "country": country,
+                "url": "#",
+                "status": "COMING_SOON",
+                "code": None,
+                "note": "COMING_SOON",
+            })
             continue
 
         parsed = urlparse(full_url)
@@ -223,25 +211,19 @@ def extract_urls(page_url: str) -> List[Dict[str, Any]]:
             })
 
     live_count = sum(1 for e in entries if e.get("status") != "COMING_SOON")
-    print(f"Found {len(entries)} franchise entries: {live_count} live, {len(entries) - live_count} coming soon.")
+    print(f"Found {len(entries)} entries: {live_count} live, {len(entries) - live_count} coming soon.")
     if live_count == 0:
-        print("No live franchise links extracted. Printing first 50 anchors for debugging:")
-        for i, a in enumerate(soup.find_all("a", href=True)[:50]):
-            text = a.get_text(strip=True)[:50]
-            print(f"  {i + 1}. Text: '{text}' -> href: {a.get('href')}")
-        raise RuntimeError("No franchise links extracted. Check page structure.")
+        raise RuntimeError("No live franchise links extracted. Check page structure.")
     return entries
 
 
 def _extract_country(tag) -> str:
-    """Walk up the DOM tree looking for the nearest preceding heading."""
     parent = tag.parent
     while parent:
         h = parent.find_previous_sibling(["h2", "h3", "h4"])
         if h:
             return h.get_text(strip=True)
         parent = parent.parent
-    # Fallback: scan whole page for a heading whose siblings include this tag
     soup = tag.find_parent("body") or tag
     for heading in soup.find_all(["h2", "h3", "h4"]):
         if tag in heading.find_next_siblings():
@@ -250,15 +232,19 @@ def _extract_country(tag) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Response classification
+# Response classification  (notebook-style: always use original url,
+#                           so www→canonical counts as REDIRECT_OTHER)
 # ---------------------------------------------------------------------------
 
 def classify_response(
-    entry: Dict, url: str, resp: httpx.Response,
-    final_url: str, title: str, body_text: str,
+    entry: Dict,
+    original_url: str,
+    resp: httpx.Response,
+    final_url: str,
+    title: str,
+    body_text: str,
 ) -> Dict:
-    """Determine status label and detailed note based on multiple signals."""
-    original_domain = urlparse(url).netloc
+    original_domain = urlparse(original_url).netloc
     final_domain = urlparse(final_url).netloc
     code = resp.status_code
 
@@ -274,45 +260,43 @@ def classify_response(
             status_label = "REDIRECT_OTHER"
             redirect_note = f"Redirected to {final_domain}"
 
-    # Check maintenance REGARDLESS of content length (not just when content is short)
     if is_maintenance(body_text) or is_maintenance(title):
         status_label = "MAINTENANCE"
 
-    # Content quality check – only override to EMPTY_PAGE if not already flagged
     content_length = len(body_text)
     is_empty = content_length < config.MIN_CONTENT_LENGTH
     if is_empty and status_label == "OK":
         status_label = "EMPTY_PAGE"
 
-    # Build note
     notes = []
     if redirect_note:
         notes.append(redirect_note)
-    if title:
-        notes.append(f"Title: {title}")
-    else:
-        notes.append("No title")
+    notes.append(f"Title: {title}" if title else "No title")
     if is_empty:
-        if status_label == "MAINTENANCE":
-            notes.append("Maintenance page (site temporarily down)")
-        else:
-            notes.append(f"Low content length ({content_length} chars)")
+        notes.append(
+            "Maintenance page (site temporarily down)"
+            if status_label == "MAINTENANCE"
+            else f"Low content length ({content_length} chars)"
+        )
 
-    # Brand mismatch check
     if title and not any(kw in title.lower() for kw in config.BRAND_KEYWORDS):
         notes.append("Brand mismatch (title doesn't contain 'lingua/learn')")
         if status_label == "OK":
             status_label = "BRAND_MISMATCH"
 
-    final_note = " | ".join(notes) if notes else "No additional info"
-    return {**entry, "status": status_label, "code": code, "note": final_note}
+    return {
+        **entry,
+        "status": status_label,
+        "code": code,
+        "note": " | ".join(notes) or "No additional info",
+    }
 
 
 # ---------------------------------------------------------------------------
-# Playwright fallback checker
+# Playwright fallback
 # ---------------------------------------------------------------------------
 
-def check_with_playwright(url: str, timeout: int):
+def check_with_playwright(url: str, timeout: int) -> Tuple[Optional[int], str, str]:
     try:
         with sync_playwright() as p:
             ua = random.choice(config.USER_AGENTS)
@@ -329,11 +313,9 @@ def check_with_playwright(url: str, timeout: int):
                 try:
                     page.wait_for_load_state("networkidle", timeout=10000)
                 except Exception:
-                    pass  # heavy pages may never reach networkidle; proceed anyway
+                    pass
                 page.wait_for_timeout(2000)
                 status = response.status if response else 0
-                # Retry title/body extraction once – a JS redirect after networkidle
-                # can destroy the execution context between wait and title().
                 try:
                     title = page.title()
                     body_text = page.locator("body").inner_text()
@@ -345,7 +327,7 @@ def check_with_playwright(url: str, timeout: int):
                 if is_parked(body_text) or is_parked(title):
                     return status, "PARKED", f"Parked domain | Title: {title}"
                 if is_bot_blocked(title, body_text):
-                    return status, "BOT_BLOCKED", f"Bot/CAPTCHA page detected | Title: {title}"
+                    return status, "BOT_BLOCKED", f"Bot/CAPTCHA detected | Title: {title}"
                 if is_maintenance(body_text) or is_maintenance(title):
                     return status, "MAINTENANCE", f"Maintenance page | Title: {title}"
                 if status < 400 and len(body_text.strip()) >= config.MIN_CONTENT_LENGTH:
@@ -360,7 +342,7 @@ def check_with_playwright(url: str, timeout: int):
 
 
 # ---------------------------------------------------------------------------
-# Per-URL checker
+# Per-URL checker  (notebook-style: 429 → redirect label, not CLIENT_ERROR)
 # ---------------------------------------------------------------------------
 
 def check_url_accurate(
@@ -375,17 +357,14 @@ def check_url_accurate(
 
     rate_limiter.wait()
 
-    # Rotate User-Agent per request
     rotated_headers = {**config.HEADERS, "User-Agent": random.choice(config.USER_AGENTS)}
 
     parsed = urlparse(url)
     netloc = parsed.netloc
     path_qs = parsed.path + ("?" + parsed.query if parsed.query else "")
-
     has_www = netloc.lower().startswith("www.")
     netloc_no_www = netloc[4:] if has_www else netloc
 
-    # Build URL variants to try: scheme flip + www-strip
     urls_to_try = [url]
     if parsed.scheme == "http":
         urls_to_try.append(f"https://{netloc}{path_qs}")
@@ -396,11 +375,9 @@ def check_url_accurate(
         alt_scheme = "http" if parsed.scheme == "https" else "https"
         urls_to_try.append(f"{alt_scheme}://{netloc_no_www}{path_qs}")
 
-    last_code = None
+    last_code: Optional[int] = None
     last_label = "ERROR"
     last_note = ""
-
-    # success_result flag pattern – avoids ambiguous break/continue in nested loops
     success_result: Optional[Dict] = None
     should_retry = False
 
@@ -410,14 +387,15 @@ def check_url_accurate(
 
         for try_url in urls_to_try:
             try:
-                resp = client.get(try_url, timeout=args.timeout,
-                                  headers=rotated_headers, follow_redirects=True)
+                resp = client.get(
+                    try_url, timeout=args.timeout,
+                    headers=rotated_headers, follow_redirects=True,
+                )
                 code = resp.status_code
                 final_url = str(resp.url)
 
                 if code < 400:
                     content_type = resp.headers.get("content-type", "")
-                    # Correct www_stripped detection: compare parsed netlocs
                     try_netloc = urlparse(try_url).netloc
                     www_stripped = has_www and try_netloc == netloc_no_www
 
@@ -435,11 +413,11 @@ def check_url_accurate(
                             success_result = {**entry, "status": pw_label, "code": pw_code, "note": pw_note}
                             break
 
-                        result = classify_response(entry, try_url, resp, final_url, title, body_text)
+                        # Pass original url so www→canonical = REDIRECT_OTHER
+                        result = classify_response(entry, url, resp, final_url, title, body_text)
                         if www_stripped:
                             result["note"] = "[www. removed] " + result.get("note", "")
 
-                        # If httpx sees EMPTY_PAGE, let Playwright have a second look
                         if result.get("status") == "EMPTY_PAGE":
                             pw_code, pw_label, pw_note = check_with_playwright(url, args.timeout)
                             if pw_label == "OK":
@@ -457,9 +435,30 @@ def check_url_accurate(
 
                 # --- non-2xx ---
                 last_code = code
-                if code == 403:
+
+                if code == 429:
+                    # Notebook behaviour: treat 429 as a soft block, resolve to redirect label
+                    final_url_429 = str(resp.url)
+                    orig_domain = urlparse(url).netloc
+                    location = resp.headers.get("location", "")
+                    loc_domain = urlparse(location).netloc if location else ""
+                    final_domain_429 = urlparse(final_url_429).netloc
+                    redirect_domain = loc_domain or final_domain_429
+
+                    if redirect_domain and redirect_domain != orig_domain:
+                        if redirect_domain.endswith(".com"):
+                            last_label = "REDIRECT_MAIN"
+                            last_note = f"Redirected to .com ({redirect_domain})"
+                        else:
+                            last_label = "REDIRECT_OTHER"
+                            last_note = f"Redirected to {redirect_domain}"
+                    else:
+                        last_label = "REDIRECT_OTHER"
+                        last_note = f"Rate limited, final URL: {final_url_429}"
+                    break  # no retry on 429
+
+                elif code == 403:
                     last_label = "FORBIDDEN"
-                    # Playwright immediately on 403 – likely bot protection
                     pw_code, pw_label, pw_note = check_with_playwright(url, args.timeout)
                     if pw_label not in ("BROWSER_ERROR", "BOT_BLOCKED"):
                         success_result = {**entry, "status": pw_label, "code": pw_code, "note": pw_note}
@@ -467,15 +466,16 @@ def check_url_accurate(
                     last_note = f"Status 403 | Playwright: {pw_note}"
                 elif code == 404:
                     last_label = "NOT_FOUND"
+                    last_note = f"Status {code}"
                 elif code >= 500:
                     last_label = f"SERVER_ERROR_{code}"
+                    last_note = f"Status {code}"
+                    if attempt < args.retries:
+                        should_retry = True
+                        break
                 else:
                     last_label = f"CLIENT_ERROR_{code}"
-                last_note = f"Status {code}"
-
-                if code >= 500 and attempt < args.retries:
-                    should_retry = True
-                    break
+                    last_note = f"Status {code}"
 
             except (httpx.TimeoutException, httpx.ConnectError) as e:
                 last_label = "TIMEOUT" if isinstance(e, httpx.TimeoutException) else "CONNECTION_ERROR"
@@ -483,28 +483,24 @@ def check_url_accurate(
                 if attempt < args.retries:
                     should_retry = True
                     break
-                # exhausted retries – try next URL variant
 
             except httpx.RequestError as e:
                 last_label = "REQUEST_ERROR"
                 last_note = str(e)[:50]
-                # don't retry on generic request errors, move to next variant
 
         if should_retry:
             should_retry = False
             time.sleep(args.retry_delay * (attempt + 1))
-            continue  # retry outer loop
+            continue
 
     if success_result is not None:
         return success_result
 
-    # Optional Playwright fallback for persistent failures
     if args.use_browser and last_label in ("TIMEOUT", "FORBIDDEN", "CONNECTION_ERROR"):
         pw_code, pw_label, pw_note = check_with_playwright(url, args.timeout)
         if pw_label not in ("BROWSER_ERROR", "PLAYWRIGHT_NOT_INSTALLED"):
             return {**entry, "status": pw_label, "code": pw_code, "note": pw_note}
 
-    # Optional fallback path probe
     if args.fallback_path and last_label not in ("OK", "PARKED"):
         fallback_url = f"{parsed.scheme}://{parsed.netloc}{args.fallback_path}"
         try:
@@ -539,16 +535,14 @@ def non_negative_float(value: str) -> float:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Check franchise links – advanced classification.")
     parser.add_argument("--url", default=config.DEFAULT_URL)
-    parser.add_argument("--output", default=None, help="Output CSV filename (timestamped if not given)")
+    parser.add_argument("--output", default=None)
     parser.add_argument("--timeout", type=positive_int, default=config.DEFAULT_TIMEOUT)
     parser.add_argument("--workers", type=positive_int, default=config.DEFAULT_MAX_WORKERS)
     parser.add_argument("--retries", type=non_negative_float, default=config.DEFAULT_RETRIES)
     parser.add_argument("--rate-limit", type=non_negative_float, default=config.DEFAULT_RATE_LIMIT)
     parser.add_argument("--retry-delay", type=non_negative_float, dest="retry_delay", default=config.DEFAULT_RETRY_DELAY)
-    parser.add_argument("--use-browser", action="store_true",
-                        help="Use Playwright as final fallback for TIMEOUT/FORBIDDEN/CONNECTION_ERROR")
-    parser.add_argument("--fallback-path", type=str, default=None,
-                        help="Probe this path on the origin if all attempts fail (e.g. /en/)")
+    parser.add_argument("--use-browser", action="store_true")
+    parser.add_argument("--fallback-path", type=str, default=None)
     args, _ = parser.parse_known_args()
     return args
 
@@ -561,9 +555,8 @@ def send_email(file_path: str) -> None:
     sender = os.environ.get("EMAIL_USER")
     password = os.environ.get("EMAIL_PASS")
     receiver = os.environ.get("EMAIL_TO")
-
     if not sender or not password or not receiver:
-        print("Email not sent: environment variables missing.")
+        print("Email not sent: EMAIL_USER / EMAIL_PASS / EMAIL_TO not set.")
         return
 
     msg = MIMEMultipart()
@@ -573,13 +566,13 @@ def send_email(file_path: str) -> None:
     msg.attach(MIMEText("Please find attached the daily franchise links check report (CSV).", "plain"))
 
     try:
-        with open(file_path, "rb") as attachment:
+        with open(file_path, "rb") as f:
             part = MIMEBase("application", "octet-stream")
-            part.set_payload(attachment.read())
+            part.set_payload(f.read())
             encoders.encode_base64(part)
             part.add_header("Content-Disposition", f"attachment; filename={os.path.basename(file_path)}")
             msg.attach(part)
-    except (OSError, IOError) as e:
+    except OSError as e:
         print(f"Failed to attach file: {e}")
         return
 
@@ -592,7 +585,7 @@ def send_email(file_path: str) -> None:
         server.send_message(msg)
         server.quit()
         print(f"Email sent to {receiver}")
-    except (smtplib.SMTPException, ConnectionError, TimeoutError) as e:
+    except Exception as e:
         print(f"Failed to send email: {e}")
 
 
@@ -612,7 +605,6 @@ def run() -> None:
     results = list(soon)
     rate_limiter = RateLimiter(args.rate_limit)
 
-    # Shared httpx client with HTTP/2 and connection pooling
     with httpx.Client(
         http2=True,
         follow_redirects=True,
@@ -627,7 +619,7 @@ def run() -> None:
             for future in as_completed(futures):
                 try:
                     result = future.result()
-                except (RuntimeError, OSError, ValueError) as exc:
+                except Exception as exc:
                     entry = futures[future]
                     result = {**entry, "status": "UNHANDLED_ERROR", "code": 0, "note": str(exc)[:100]}
                 results.append(result)
