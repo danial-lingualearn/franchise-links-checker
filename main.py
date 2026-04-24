@@ -306,9 +306,9 @@ def check_with_playwright(url: str, timeout: int) -> Tuple[Optional[int], str, s
                 page.wait_for_timeout(2000)
                 status = response.status if response else 0
                 try:
-                    # Wait for title element to exist and be non-empty
+                    # Wait for title element to exist and be non-empty (increased timeout to 10s for JS-heavy pages)
                     try:
-                        page.wait_for_function("document.title.length > 0", timeout=5000)
+                        page.wait_for_function("document.title.length > 0", timeout=10000)
                     except Exception:
                         pass  # Title may still be empty, continue anyway
                     title = page.title()
@@ -449,6 +449,10 @@ def check_url_accurate(
                     final_domain_429 = urlparse(final_url_429).netloc
                     redirect_domain = loc_domain or final_domain_429
 
+                    # Debug log for Chile/Lithuania
+                    if "lingua-learn.cl" in url or "lingua-learn.lt" in url:
+                        print(f"[DEBUG 429] {url} -> {final_url_429} | Domain mismatch: {redirect_domain} != {orig_domain}")
+
                     if redirect_domain and redirect_domain != orig_domain:
                         if redirect_domain.endswith(".com"):
                             last_label = "REDIRECT_MAIN"
@@ -459,7 +463,11 @@ def check_url_accurate(
                     else:
                         last_label = "REDIRECT_OTHER"
                         last_note = f"Rate limited, final URL: {final_url_429}"
-                    break  # no retry on 429
+                    # Exponential backoff: try again with longer delay for rate-limited URLs
+                    if attempt < args.retries:
+                        should_retry = True
+                        break  # trigger retry with exponential backoff
+                    break  # no more retries available
 
                 elif code == 403:
                     last_label = "FORBIDDEN"
@@ -507,7 +515,11 @@ def check_url_accurate(
 
         if should_retry:
             should_retry = False
-            time.sleep(args.retry_delay * (attempt + 1))
+            # Exponential backoff: multiply delay by (attempt + 2) to be more aggressive on retries
+            backoff_delay = args.retry_delay * (2 ** attempt) + random.uniform(0.5, 2.0)
+            if "lingua-learn.cl" in url or "lingua-learn.lt" in url:
+                print(f"[DEBUG RETRY] {url} - Attempt {attempt + 1}, waiting {backoff_delay:.1f}s")
+            time.sleep(backoff_delay)
             continue
 
     if success_result is not None:
