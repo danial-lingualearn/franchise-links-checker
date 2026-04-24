@@ -412,6 +412,16 @@ def check_url_accurate(
                                 success_result = {**entry, "status": "OK", "code": pw_code, "note": f"Browser-rendered | Title: {pw_title}"}
                                 break
 
+                        # If we got 2xx response but no title from httpx, try Playwright to get the rendered title
+                        # This applies to OK, REDIRECT_OTHER, REDIRECT_MAIN, etc.
+                        if not title and code < 400 and result.get("status") != "EMPTY_PAGE":
+                            pw_code, pw_label, pw_title, pw_body = check_with_playwright(url, args.timeout)
+                            if pw_code and pw_code < 400 and pw_title:
+                                # Re-run through classify_response with proper rendered title/body
+                                result = classify_response(entry, url, resp, final_url, pw_title, pw_body)
+                                if www_stripped:
+                                    result["note"] = "[www. removed] " + result.get("note", "")
+
                         success_result = result
                         break
                     else:
