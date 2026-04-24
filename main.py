@@ -306,6 +306,11 @@ def check_with_playwright(url: str, timeout: int) -> Tuple[Optional[int], str, s
                 page.wait_for_timeout(2000)
                 status = response.status if response else 0
                 try:
+                    # Wait for title element to exist and be non-empty
+                    try:
+                        page.wait_for_function("document.title.length > 0", timeout=5000)
+                    except Exception:
+                        pass  # Title may still be empty, continue anyway
                     title = page.title()
                     body_text = page.locator("body").inner_text()
                 except Exception:
@@ -416,8 +421,9 @@ def check_url_accurate(
                         # This applies to OK, REDIRECT_OTHER, REDIRECT_MAIN, etc.
                         if not title and code < 400 and result.get("status") != "EMPTY_PAGE":
                             pw_code, pw_label, pw_title, pw_body = check_with_playwright(url, args.timeout)
-                            if pw_code and pw_code < 400 and pw_title:
-                                # Re-run through classify_response with proper rendered title/body
+                            # If Playwright succeeded in getting a 2xx response, use its data even if title is empty
+                            if pw_code and pw_code < 400:
+                                # Re-run through classify_response with Playwright's rendered data
                                 result = classify_response(entry, url, resp, final_url, pw_title, pw_body)
                                 if www_stripped:
                                     result["note"] = "[www. removed] " + result.get("note", "")
