@@ -24,9 +24,7 @@ from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 
 
-# ---------------------------------------------------------------------------
 # Config
-# ---------------------------------------------------------------------------
 
 class Config:
     DEFAULT_URL = "https://lingua-learn.com/franchise/"
@@ -80,9 +78,7 @@ MAINTENANCE_PHRASES = [
 ]
 
 
-# ---------------------------------------------------------------------------
 # Rate limiter
-# ---------------------------------------------------------------------------
 
 class RateLimiter:
     def __init__(self, rate: float):
@@ -111,9 +107,7 @@ class RateLimiter:
         time.sleep(random.uniform(1.5, 4.0))
 
 
-# ---------------------------------------------------------------------------
 # Detection helpers
-# ---------------------------------------------------------------------------
 
 def is_parked(text: str) -> bool:
     low = text.lower()
@@ -132,9 +126,7 @@ def is_bot_blocked(title: str, body_text: str) -> bool:
     return any(p in combined for p in config.BOT_DETECTION_PHRASES)
 
 
-# ---------------------------------------------------------------------------
 # Page extraction  (Playwright, no COMING_SOON dedup — notebook behaviour)
-# ---------------------------------------------------------------------------
 
 def extract_urls(page_url: str) -> List[Dict[str, Any]]:
     print(f"Loading page with Playwright: {page_url}")
@@ -231,10 +223,8 @@ def _extract_country(tag) -> str:
     return "Unknown"
 
 
-# ---------------------------------------------------------------------------
 # Response classification  (notebook-style: always use original url,
 #                           so www→canonical counts as REDIRECT_OTHER)
-# ---------------------------------------------------------------------------
 
 def classify_response(
     entry: Dict,
@@ -252,16 +242,17 @@ def classify_response(
     redirect_note = ""
     status_label = "OK"
 
-    if is_redirect:
+    # Check maintenance FIRST (highest priority)
+    if is_maintenance(body_text) or is_maintenance(title):
+        status_label = "MAINTENANCE"
+    # Then check for redirect
+    elif is_redirect:
         if final_domain.endswith(".com"):
             status_label = "REDIRECT_MAIN"
             redirect_note = f"Redirected to .com ({final_domain})"
         else:
             status_label = "REDIRECT_OTHER"
             redirect_note = f"Redirected to {final_domain}"
-
-    if is_maintenance(body_text) or is_maintenance(title):
-        status_label = "MAINTENANCE"
 
     content_length = len(body_text)
     is_empty = content_length < config.MIN_CONTENT_LENGTH
@@ -292,11 +283,9 @@ def classify_response(
     }
 
 
-# ---------------------------------------------------------------------------
 # Playwright fallback
-# ---------------------------------------------------------------------------
 
-def check_with_playwright(url: str, timeout: int) -> Tuple[Optional[int], str, str]:
+def check_with_playwright(url: str, timeout: int) -> Tuple[Optional[int], str, str, str]:
     try:
         with sync_playwright() as p:
             ua = random.choice(config.USER_AGENTS)
@@ -325,25 +314,23 @@ def check_with_playwright(url: str, timeout: int) -> Tuple[Optional[int], str, s
                     body_text = page.locator("body").inner_text()
 
                 if is_parked(body_text) or is_parked(title):
-                    return status, "PARKED", f"Parked domain | Title: {title}"
+                    return status, "PARKED", title, body_text
                 if is_bot_blocked(title, body_text):
-                    return status, "BOT_BLOCKED", f"Bot/CAPTCHA detected | Title: {title}"
+                    return status, "BOT_BLOCKED", title, body_text
                 if is_maintenance(body_text) or is_maintenance(title):
-                    return status, "MAINTENANCE", f"Maintenance page | Title: {title}"
+                    return status, "MAINTENANCE", title, body_text
                 if status < 400 and len(body_text.strip()) >= config.MIN_CONTENT_LENGTH:
-                    return status, "OK", f"Browser-rendered | Title: {title}"
+                    return status, "OK", title, body_text
                 if status < 400:
-                    return status, "EMPTY_PAGE", f"Browser-rendered but empty | Title: {title}"
-                return status, f"HTTP_{status}", f"Playwright fallback | Title: {title}"
+                    return status, "EMPTY_PAGE", title, body_text
+                return status, f"HTTP_{status}", title, body_text
             finally:
                 browser.close()
     except Exception as e:
-        return None, "BROWSER_ERROR", str(e)[:80]
+        return None, "BROWSER_ERROR", "", str(e)[:80]
 
 
-# ---------------------------------------------------------------------------
 # Per-URL checker  (notebook-style: 429 → redirect label, not CLIENT_ERROR)
-# ---------------------------------------------------------------------------
 
 def check_url_accurate(
     entry: Dict[str, Any],
@@ -409,7 +396,8 @@ def check_url_accurate(
                             break
 
                         if is_bot_blocked(title, body_text):
-                            pw_code, pw_label, pw_note = check_with_playwright(url, args.timeout)
+                            pw_code, pw_label, pw_title, pw_body = check_with_playwright(url, args.timeout)
+                            pw_note = f"Bot/CAPTCHA detected | Title: {pw_title}"
                             success_result = {**entry, "status": pw_label, "code": pw_code, "note": pw_note}
                             break
 
@@ -419,9 +407,9 @@ def check_url_accurate(
                             result["note"] = "[www. removed] " + result.get("note", "")
 
                         if result.get("status") == "EMPTY_PAGE":
-                            pw_code, pw_label, pw_note = check_with_playwright(url, args.timeout)
+                            pw_code, pw_label, pw_title, pw_body = check_with_playwright(url, args.timeout)
                             if pw_label == "OK":
-                                success_result = {**entry, "status": "OK", "code": pw_code, "note": pw_note}
+                                success_result = {**entry, "status": "OK", "code": pw_code, "note": f"Browser-rendered | Title: {pw_title}"}
                                 break
 
                         success_result = result
@@ -459,11 +447,24 @@ def check_url_accurate(
 
                 elif code == 403:
                     last_label = "FORBIDDEN"
-                    pw_code, pw_label, pw_note = check_with_playwright(url, args.timeout)
+                    pw_code, pw_label, pw_title, pw_body = check_with_playwright(url, args.timeout)
                     if pw_label not in ("BROWSER_ERROR", "BOT_BLOCKED"):
-                        success_result = {**entry, "status": pw_label, "code": pw_code, "note": pw_note}
+                        if pw_code and pw_code < 400:
+                            # Run Playwright result through classify_response for consistent title/brand/maintenance checks
+                            class MockResponse:
+                                def __init__(self, status_code):
+                                    self.status_code = status_code
+                                    self.url = url
+                                    self.headers = {}
+                            mock_resp = MockResponse(pw_code)
+                            result = classify_response(entry, url, mock_resp, url, pw_title, pw_body)
+                            success_result = result
+                        else:
+                            pw_note = f"Status {pw_code} | Title: {pw_title}"
+                            success_result = {**entry, "status": pw_label, "code": pw_code, "note": pw_note}
                         break
-                    last_note = f"Status 403 | Playwright: {pw_note}"
+                    pw_note = f"Status 403 | Playwright: Browser error or blocked"
+                    last_note = pw_note
                 elif code == 404:
                     last_label = "NOT_FOUND"
                     last_note = f"Status {code}"
@@ -497,8 +498,9 @@ def check_url_accurate(
         return success_result
 
     if args.use_browser and last_label in ("TIMEOUT", "FORBIDDEN", "CONNECTION_ERROR"):
-        pw_code, pw_label, pw_note = check_with_playwright(url, args.timeout)
+        pw_code, pw_label, pw_title, pw_body = check_with_playwright(url, args.timeout)
         if pw_label not in ("BROWSER_ERROR", "PLAYWRIGHT_NOT_INSTALLED"):
+            pw_note = f"Browser-rendered | Title: {pw_title}"
             return {**entry, "status": pw_label, "code": pw_code, "note": pw_note}
 
     if args.fallback_path and last_label not in ("OK", "PARKED"):
@@ -514,9 +516,7 @@ def check_url_accurate(
     return {**entry, "status": last_label, "code": last_code, "note": last_note or entry.get("note", "")}
 
 
-# ---------------------------------------------------------------------------
 # Argument parsing
-# ---------------------------------------------------------------------------
 
 def positive_int(value: str) -> int:
     ivalue = int(value)
@@ -547,9 +547,7 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-# ---------------------------------------------------------------------------
 # Email delivery
-# ---------------------------------------------------------------------------
 
 def send_email(file_path: str) -> None:
     sender = os.environ.get("EMAIL_USER")
@@ -589,9 +587,7 @@ def send_email(file_path: str) -> None:
         print(f"Failed to send email: {e}")
 
 
-# ---------------------------------------------------------------------------
 # Entry point
-# ---------------------------------------------------------------------------
 
 def run() -> None:
     args = parse_args()
