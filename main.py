@@ -423,7 +423,7 @@ def check_url_accurate(
 
                     if "text/html" in content_type:
                         soup = BeautifulSoup(resp.text, "html.parser")
-                        title = soup.title.string.strip() if soup.title else ""
+                        title = soup.title.get_text(strip=True) if soup.title else ""
                         body_text = soup.get_text(strip=True)
 
                         if is_parked(body_text) or is_parked(title):
