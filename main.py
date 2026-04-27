@@ -597,6 +597,21 @@ def check_url_accurate(
     trigger_browser = last_label in ("TIMEOUT", "FORBIDDEN", "CONNECTION_ERROR") or last_429
     if trigger_browser:
         pw_code, pw_label, pw_title, pw_body = check_with_playwright(url, args.timeout)
+
+        # Playwright itself got rate-limited (empty title + 429 code).
+        # Wait 30-60s and retry once more — the IP cooldown window is usually
+        # short enough that a single patient retry succeeds.
+        pw_still_blocked = (
+            pw_label == "HTTP_429"
+            or (pw_code and pw_code == 429)
+            or (pw_label not in ("BROWSER_ERROR",) and not pw_title.strip() and last_429)
+        )
+        if pw_still_blocked:
+            wait = random.uniform(30, 60)
+            print(f"  [429-deep] {url} — Playwright also blocked, waiting {wait:.0f}s for second chance...")
+            time.sleep(wait)
+            pw_code, pw_label, pw_title, pw_body = check_with_playwright(url, args.timeout)
+
         if pw_label not in ("BROWSER_ERROR",):
             return {**entry, "status": pw_label, "code": pw_code,
                     "note": f"Browser-rendered | Title: {pw_title}"}
