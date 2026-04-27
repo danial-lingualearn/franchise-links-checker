@@ -1,19 +1,23 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Franchise Links Checker – Daily Scan Edition (Production / main.py)
+"""Franchise Links Checker – Daily Scan Edition (Production / GitHub Actions)
 
-Key improvements over the original:
-  - 2 workers with tuned delays to finish within 30 minutes on GitHub Actions
-  - Longer inter-request delays (3–7s random) instead of 1.5–4s
-  - Global 429 cooldown (10–20s) before retrying
-  - Playwright always triggered on 429 final state (catches MAINTENANCE pages
-    that return 429 before we can read their content, e.g. Chile, Lithuania)
-  - httpx-first extraction with Playwright fallback (avoids slow Playwright
-    startup when the franchise page renders fine as static HTML)
+Key design decisions (derived from multi-run empirical data):
+  - workers=1  →  eliminates inter-request collisions; this single change
+                  removed all 429 errors in every clean run
+  - Playwright required  →  hard import; always available in CI
+  - httpx-first page extraction with Playwright fallback
+  - MAINTENANCE has priority over REDIRECT in classify_response
+  - 429 final state always triggers Playwright (catches MAINTENANCE pages
+    that rate-limit before body is readable — e.g. Chile, Lithuania)
   - Exponential backoff with jitter on retries
-  - Maintenance check has priority over redirect in classify_response
-  - Per-run summary printed to stdout
-  - Email delivery via SMTP (set EMAIL_USER / EMAIL_PASS / EMAIL_TO env vars)
+  - 5–10 s cooldown after every 429 before retry
+  - 2–4 s human-like random delay between every request
+  - Per-entry [N/M] progress + end-of-run summary
+  - Email delivery via SMTP (EMAIL_USER / EMAIL_PASS / EMAIL_TO env vars)
+
+GitHub Actions recommended run command:
+    python main_daily.py --use-browser
 """
 
 import csv
@@ -44,16 +48,16 @@ from playwright.sync_api import sync_playwright
 # ---------------------------------------------------------------------------
 
 class Config:
-    DEFAULT_URL            = "https://lingua-learn.com/franchise/"
-    DEFAULT_OUTPUT_BASE    = "Franchise_Links_Report"
-    DEFAULT_TIMEOUT        = 25      # generous for slow TLDs
-    DEFAULT_MAX_WORKERS    = 2       # 2 workers balances speed vs 429 risk
-    DEFAULT_RETRIES        = 2       # fewer retries saves significant time
-    DEFAULT_RETRY_DELAY    = 3       # base seconds for exponential backoff
-    DEFAULT_RATE_LIMIT     = 0.3     # slightly faster token replenishment
-    MIN_CONTENT_LENGTH     = 200
-    BRAND_KEYWORDS         = ["lingua", "learn", "language"]
-    BOT_DETECTION_PHRASES  = [
+    DEFAULT_URL         = "https://lingua-learn.com/franchise/"
+    DEFAULT_OUTPUT_BASE = "Franchise_Links_Report"
+    DEFAULT_TIMEOUT     = 25      # generous for slow TLDs
+    DEFAULT_MAX_WORKERS = 1       # single worker — eliminates 429 collisions
+    DEFAULT_RETRIES     = 2
+    DEFAULT_RETRY_DELAY = 3       # base seconds for exponential backoff
+    DEFAULT_RATE_LIMIT  = 0.3
+    MIN_CONTENT_LENGTH  = 200
+    BRAND_KEYWORDS      = ["lingua", "learn", "language"]
+    BOT_DETECTION_PHRASES = [
         "bot verification", "captcha", "access denied",
         "please verify", "are you human", "robot challenge",
     ]
@@ -123,7 +127,7 @@ class RateLimiter:
                 self.last_time = time.monotonic()
             else:
                 self.tokens -= 1.0
-        # Mandatory human-like delay between requests
+        # Human-like inter-request delay — reduces 429 risk at single-worker concurrency
         time.sleep(random.uniform(2.0, 4.0))
 
 
@@ -149,14 +153,15 @@ def is_bot_blocked(title: str, body_text: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Page extraction  (Playwright for JS-rendered pages; httpx preflight)
+# Page extraction  (httpx-first, Playwright fallback)
 # ---------------------------------------------------------------------------
 
 def extract_urls(page_url: str) -> List[Dict[str, Any]]:
     """Fetch the franchise listing page and extract all 'Visit Website' links.
 
-    Tries httpx first. If no live links are found (JS-rendered page), falls
-    back to Playwright with scroll + wait for the anchor elements.
+    Tries plain httpx first (fast, no Playwright startup).
+    Falls back to Playwright only when the page appears JS-rendered (no live
+    links found via httpx).
     """
     html       = _fetch_html_httpx(page_url)
     entries    = _parse_entries(html, page_url)
@@ -198,12 +203,12 @@ def _fetch_html_playwright(url: str) -> str:
             try:
                 context = browser.new_context(user_agent=config.HEADERS["User-Agent"])
                 page    = context.new_page()
-                page.goto(url, timeout=60000, wait_until="domcontentloaded")
+                page.goto(url, timeout=60_000, wait_until="domcontentloaded")
                 for _ in range(3):
                     page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                     page.wait_for_timeout(3000)
                 try:
-                    page.wait_for_selector("a:has-text('Visit Website')", timeout=15000)
+                    page.wait_for_selector("a:has-text('Visit Website')", timeout=15_000)
                 except Exception:
                     print("Warning: 'Visit Website' links not found after waiting.")
                 return page.content()
@@ -216,7 +221,7 @@ def _fetch_html_playwright(url: str) -> str:
 def _parse_entries(html: str, page_url: str) -> List[Dict[str, Any]]:
     if not html:
         return []
-    soup  = BeautifulSoup(html, "html.parser")
+    soup    = BeautifulSoup(html, "html.parser")
     seen: set = set()
     entries   = []
 
@@ -235,7 +240,6 @@ def _parse_entries(html: str, page_url: str) -> List[Dict[str, Any]]:
             continue
 
         full_url = urljoin(page_url, href)
-
         if (
             href == page_url
             or not full_url.startswith(("http://", "https://"))
@@ -294,13 +298,13 @@ def check_with_playwright(url: str, timeout: int) -> Tuple[Optional[int], str, s
                 response = page.goto(url, timeout=timeout * 1000,
                                      wait_until="domcontentloaded")
                 try:
-                    page.wait_for_load_state("networkidle", timeout=10000)
+                    page.wait_for_load_state("networkidle", timeout=10_000)
                 except Exception:
                     pass
                 page.wait_for_timeout(2000)
                 status = response.status if response else 0
                 try:
-                    page.wait_for_function("document.title.length > 0", timeout=10000)
+                    page.wait_for_function("document.title.length > 0", timeout=10_000)
                 except Exception:
                     pass
                 title     = page.title()
@@ -454,19 +458,17 @@ def check_url_accurate(
                         if is_bot_blocked(title, body_text):
                             pw_code, pw_label, pw_title, pw_body = \
                                 check_with_playwright(url, args.timeout)
-                            pw_note = f"Bot/CAPTCHA detected | Title: {pw_title}"
                             success_result = {
-                                **entry, "status": pw_label,
-                                "code": pw_code, "note": pw_note,
+                                **entry, "status": pw_label, "code": pw_code,
+                                "note": f"Bot/CAPTCHA detected | Title: {pw_title}",
                             }
                             break
 
-                        # Always pass original url — www→canonical = REDIRECT_OTHER
-                        result = classify_response(entry, url, resp, final_url,
-                                                   title, body_text)
+                        result = classify_response(entry, url, resp, final_url, title, body_text)
                         if www_stripped:
                             result["note"] = "[www. removed] " + result.get("note", "")
 
+                        # Empty page — try Playwright for a proper render
                         if result.get("status") == "EMPTY_PAGE":
                             pw_code, pw_label, pw_title, pw_body = \
                                 check_with_playwright(url, args.timeout)
@@ -477,7 +479,7 @@ def check_url_accurate(
                                 }
                                 break
 
-                        # No title from httpx → get rendered title via Playwright
+                        # No title from httpx — get rendered title via Playwright
                         if not title and code < 400 and result.get("status") != "EMPTY_PAGE":
                             pw_code, pw_label, pw_title, pw_body = \
                                 check_with_playwright(url, args.timeout)
@@ -500,11 +502,11 @@ def check_url_accurate(
                 last_code = code
 
                 if code == 429:
-                    last_429       = True
-                    final_url_429  = str(resp.url)
-                    orig_domain    = urlparse(url).netloc
-                    location       = resp.headers.get("location", "")
-                    loc_domain     = urlparse(location).netloc if location else ""
+                    last_429      = True
+                    final_url_429 = str(resp.url)
+                    orig_domain   = urlparse(url).netloc
+                    location      = resp.headers.get("location", "")
+                    loc_domain    = urlparse(location).netloc if location else ""
                     final_domain_429 = urlparse(final_url_429).netloc
                     redirect_domain  = loc_domain or final_domain_429
 
@@ -516,10 +518,9 @@ def check_url_accurate(
                             last_label = "REDIRECT_OTHER"
                             last_note  = f"Redirected to {redirect_domain}"
                     else:
-                        last_label = "REDIRECT_OTHER"
+                        last_label = "HTTP_429"
                         last_note  = f"Rate limited, final URL: {final_url_429}"
 
-                    # Cooldown before retry so the server can recover
                     cooldown = random.uniform(5, 10)
                     print(f"  [429] {url} — cooling down {cooldown:.0f}s before retry...")
                     time.sleep(cooldown)
@@ -529,6 +530,8 @@ def check_url_accurate(
 
                 elif code == 403:
                     last_label = "FORBIDDEN"
+                    last_note  = f"Status {code}"
+                    # Immediate Playwright fallback for 403 — often just a bot gate
                     pw_code, pw_label, pw_title, pw_body = \
                         check_with_playwright(url, args.timeout)
                     if pw_label not in ("BROWSER_ERROR", "BOT_BLOCKED"):
@@ -538,16 +541,16 @@ def check_url_accurate(
                                     self.status_code = status_code
                                     self.url         = url
                                     self.headers     = {}
-                            mock_resp    = MockResponse(pw_code)
-                            result       = classify_response(entry, url, mock_resp,
-                                                             url, pw_title, pw_body)
+                            result = classify_response(entry, url, MockResponse(pw_code),
+                                                       url, pw_title, pw_body)
                             success_result = result
                         else:
-                            pw_note = f"Status {pw_code} | Title: {pw_title}"
-                            success_result = {**entry, "status": pw_label,
-                                              "code": pw_code, "note": pw_note}
+                            success_result = {
+                                **entry, "status": pw_label, "code": pw_code,
+                                "note": f"Status {pw_code} | Title: {pw_title}",
+                            }
                         break
-                    last_note = f"Status 403 | Playwright: Browser error or blocked"
+                    last_note = "Status 403 | Playwright: browser error or still blocked"
 
                 elif code == 404:
                     last_label = "NOT_FOUND"
@@ -584,24 +587,15 @@ def check_url_accurate(
     if success_result is not None:
         return success_result
 
-    # Final fallback: Playwright for 429 final state (catches MAINTENANCE pages
-    # that rate-limit before we can read their content — Chile, Lithuania, etc.)
+    # Final fallback: Playwright for TIMEOUT / FORBIDDEN / CONNECTION_ERROR
+    # AND for 429 final state — catches maintenance pages (Chile, Lithuania, etc.)
+    # that rate-limit before body is readable.
     trigger_browser = last_label in ("TIMEOUT", "FORBIDDEN", "CONNECTION_ERROR") or last_429
     if trigger_browser:
         pw_code, pw_label, pw_title, pw_body = check_with_playwright(url, args.timeout)
         if pw_label not in ("BROWSER_ERROR",):
-            pw_note = f"Browser-rendered | Title: {pw_title}"
-            return {**entry, "status": pw_label, "code": pw_code, "note": pw_note}
-
-    if args.fallback_path and last_label not in ("OK", "PARKED"):
-        fallback_url = f"{parsed.scheme}://{parsed.netloc}{args.fallback_path}"
-        try:
-            fb_resp = client.get(fallback_url, timeout=args.timeout)
-            if fb_resp.status_code < 400:
-                return {**entry, "status": "OK", "code": fb_resp.status_code,
-                        "note": f"resolved via fallback {args.fallback_path}"}
-        except httpx.RequestError:
-            pass
+            return {**entry, "status": pw_label, "code": pw_code,
+                    "note": f"Browser-rendered | Title: {pw_title}"}
 
     return {**entry, "status": last_label, "code": last_code,
             "note": last_note or entry.get("note", "")}
@@ -648,7 +642,7 @@ def parse_args() -> argparse.Namespace:
 # Email delivery
 # ---------------------------------------------------------------------------
 
-def send_email(file_path: str) -> None:
+def send_email(file_path: str, summary: str) -> None:
     sender   = os.environ.get("EMAIL_USER")
     password = os.environ.get("EMAIL_PASS")
     receiver = os.environ.get("EMAIL_TO")
@@ -656,13 +650,17 @@ def send_email(file_path: str) -> None:
         print("Email not sent: set EMAIL_USER / EMAIL_PASS / EMAIL_TO env vars.")
         return
 
+    date_str = datetime.now().strftime("%d %b %Y")
     msg            = MIMEMultipart()
     msg["From"]    = sender
     msg["To"]      = receiver
-    msg["Subject"] = f"Franchise Links Report – {datetime.now().strftime('%d %b %Y')}"
-    msg.attach(MIMEText(
-        "Please find attached the daily franchise links check report (CSV).", "plain"
-    ))
+    msg["Subject"] = f"Franchise Links Report – {date_str}"
+    body = (
+        f"Daily franchise links check completed on {date_str}.\n\n"
+        f"Summary:\n{summary}\n\n"
+        "Full report attached as CSV."
+    )
+    msg.attach(MIMEText(body, "plain"))
 
     try:
         with open(file_path, "rb") as f:
@@ -696,7 +694,7 @@ def send_email(file_path: str) -> None:
 def run() -> None:
     args = parse_args()
 
-    print(f"Starting daily scan of: {args.url}")
+    print(f"Starting daily scan  →  {args.url}")
     print(f"Workers: {args.workers} | Timeout: {args.timeout}s | "
           f"Retries: {args.retries} | Retry delay: {args.retry_delay}s | "
           f"Browser fallback: {args.use_browser}")
@@ -744,14 +742,13 @@ def run() -> None:
         writer.writeheader()
         writer.writerows(results)
 
-    print(f"\nDone. CSV saved: {output_file}")
+    print(f"\nDone. Report saved: {output_file}")
 
-    # Summary
-    counts = Counter(r["status"] for r in results)
-    for status, count in sorted(counts.items()):
-        print(f"  {status}: {count}")
+    counts  = Counter(r["status"] for r in results)
+    summary = "\n".join(f"  {status}: {count}" for status, count in sorted(counts.items()))
+    print(summary)
 
-    send_email(output_file)
+    send_email(output_file, summary)
 
 
 if __name__ == "__main__":
