@@ -2,32 +2,39 @@ name: Daily Franchise Links Check
 
 on:
   schedule:
-    - cron: '0 0 * * *'  # midnight UTC = 7:00 AM WIB
-  workflow_dispatch:
+    - cron: '0 0 * * *'   # 3 AM UTC daily
+  workflow_dispatch:        # allow manual trigger
 
 jobs:
   check-links:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45     # raised from default 30 — scan can take 20–35 min
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
+
       - name: Install dependencies
         run: |
-          pip install -r requirements.txt
+          pip install httpx[http2] beautifulsoup4 playwright
           playwright install chromium
+          playwright install-deps chromium
+
       - name: Run link checker
         env:
           EMAIL_USER: ${{ secrets.EMAIL_USER }}
           EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
           EMAIL_TO: ${{ secrets.EMAIL_TO }}
-        run: python main.py
-      - name: Upload CSV artifact
+        run: python main_daily.py --use-browser
+
+      - name: Upload report artifact
         uses: actions/upload-artifact@v4
         with:
-          name: franchise-report
+          name: franchise-links-report
           path: Franchise_Links_Report_*.csv
-          retention-days: 7
+          retention-days: 30
