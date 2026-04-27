@@ -3,7 +3,7 @@
 """Franchise Links Checker – Daily Scan Edition (Production / main.py)
 
 Key improvements over the original:
-  - Single worker (DEFAULT_MAX_WORKERS=1) to avoid triggering 429 rate limits
+  - 2 workers with tuned delays to finish within 30 minutes on GitHub Actions
   - Longer inter-request delays (3–7s random) instead of 1.5–4s
   - Global 429 cooldown (10–20s) before retrying
   - Playwright always triggered on 429 final state (catches MAINTENANCE pages
@@ -47,10 +47,10 @@ class Config:
     DEFAULT_URL            = "https://lingua-learn.com/franchise/"
     DEFAULT_OUTPUT_BASE    = "Franchise_Links_Report"
     DEFAULT_TIMEOUT        = 25      # generous for slow TLDs
-    DEFAULT_MAX_WORKERS    = 1       # single worker avoids 429 cascades
-    DEFAULT_RETRIES        = 3
-    DEFAULT_RETRY_DELAY    = 5       # base seconds for exponential backoff
-    DEFAULT_RATE_LIMIT     = 0.2     # slow token replenishment
+    DEFAULT_MAX_WORKERS    = 2       # 2 workers balances speed vs 429 risk
+    DEFAULT_RETRIES        = 2       # fewer retries saves significant time
+    DEFAULT_RETRY_DELAY    = 3       # base seconds for exponential backoff
+    DEFAULT_RATE_LIMIT     = 0.3     # slightly faster token replenishment
     MIN_CONTENT_LENGTH     = 200
     BRAND_KEYWORDS         = ["lingua", "learn", "language"]
     BOT_DETECTION_PHRASES  = [
@@ -123,8 +123,8 @@ class RateLimiter:
                 self.last_time = time.monotonic()
             else:
                 self.tokens -= 1.0
-        # Mandatory human-like delay between requests (increased from original 1.5–4s)
-        time.sleep(random.uniform(3.0, 7.0))
+        # Mandatory human-like delay between requests
+        time.sleep(random.uniform(2.0, 4.0))
 
 
 # ---------------------------------------------------------------------------
@@ -519,8 +519,8 @@ def check_url_accurate(
                         last_label = "REDIRECT_OTHER"
                         last_note  = f"Rate limited, final URL: {final_url_429}"
 
-                    # Global cooldown before retry so the server can recover
-                    cooldown = random.uniform(10, 20)
+                    # Cooldown before retry so the server can recover
+                    cooldown = random.uniform(5, 10)
                     print(f"  [429] {url} — cooling down {cooldown:.0f}s before retry...")
                     time.sleep(cooldown)
                     if attempt < args.retries:
