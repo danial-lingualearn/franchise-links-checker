@@ -58,8 +58,12 @@ class Config:
     MIN_CONTENT_LENGTH  = 200
     BRAND_KEYWORDS      = ["lingua", "learn", "language"]
     BOT_DETECTION_PHRASES = [
+        # Generic bot/CAPTCHA gates
         "bot verification", "captcha", "access denied",
         "please verify", "are you human", "robot challenge",
+        # Cloudflare challenge pages
+        "checking your browser", "just a moment", "enable javascript and cookies",
+        "ray id", "cf-browser-verification", "attention required! | cloudflare",
     ]
     USER_AGENTS = [
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
