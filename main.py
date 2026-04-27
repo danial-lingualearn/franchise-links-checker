@@ -607,7 +607,7 @@ def check_url_accurate(
             or (pw_label not in ("BROWSER_ERROR",) and not pw_title.strip() and last_429)
         )
         if pw_still_blocked:
-            wait = random.uniform(30, 60)
+            wait = random.uniform(15, 25)
             print(f"  [429-deep] {url} — Playwright also blocked, waiting {wait:.0f}s for second chance...")
             time.sleep(wait)
             pw_code, pw_label, pw_title, pw_body = check_with_playwright(url, args.timeout)
