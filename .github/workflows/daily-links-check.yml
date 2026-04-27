@@ -30,7 +30,7 @@ jobs:
           EMAIL_USER: ${{ secrets.EMAIL_USER }}
           EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
           EMAIL_TO: ${{ secrets.EMAIL_TO }}
-        run: python main_daily.py --use-browser
+        run: python main.py --use-browser
 
       - name: Upload report artifact
         uses: actions/upload-artifact@v4
