@@ -17,7 +17,7 @@ Key design decisions (derived from multi-run empirical data):
   - Email delivery via SMTP (EMAIL_USER / EMAIL_PASS / EMAIL_TO env vars)
 
 GitHub Actions recommended run command:
-    python main_daily.py --use-browser
+    python main.py --use-browser
 """
 
 import csv
