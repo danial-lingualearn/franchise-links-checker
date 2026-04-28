@@ -17,7 +17,7 @@ Key design decisions (derived from multi-run empirical data):
   - Email delivery via SMTP (EMAIL_USER / EMAIL_PASS / EMAIL_TO env vars)
 
 GitHub Actions recommended run command:
-    python main.py --use-browser
+    python main_daily.py --use-browser
 """
 
 import csv
@@ -472,13 +472,15 @@ def check_url_accurate(
                         if www_stripped:
                             result["note"] = "[www. removed] " + result.get("note", "")
 
-                        # Empty page — try Playwright for a proper render
-                        if result.get("status") == "EMPTY_PAGE":
+                        # Empty page — try Playwright for a proper render.
+                        # Also catches HTTP 202 (async/queued response) which
+                        # returns an empty body that httpx can't read further.
+                        if result.get("status") == "EMPTY_PAGE" or code == 202:
                             pw_code, pw_label, pw_title, pw_body = \
                                 check_with_playwright(url, args.timeout)
-                            if pw_label == "OK":
+                            if pw_label not in ("BROWSER_ERROR", "EMPTY_PAGE"):
                                 success_result = {
-                                    **entry, "status": "OK", "code": pw_code,
+                                    **entry, "status": pw_label, "code": pw_code,
                                     "note": f"Browser-rendered | Title: {pw_title}",
                                 }
                                 break
@@ -515,12 +517,15 @@ def check_url_accurate(
                     redirect_domain  = loc_domain or final_domain_429
 
                     if redirect_domain and redirect_domain != orig_domain:
+                        # We have enough info from headers — classify and return now.
+                        # Don't retry or use Playwright; the CDN will keep rate-limiting.
                         if redirect_domain.endswith(".com"):
-                            last_label = "REDIRECT_MAIN"
-                            last_note  = f"Redirected to .com ({redirect_domain})"
+                            label = "REDIRECT_MAIN"
+                            note  = f"Redirected to .com ({redirect_domain}) [rate-limited]"
                         else:
-                            last_label = "REDIRECT_OTHER"
-                            last_note  = f"Redirected to {redirect_domain}"
+                            label = "REDIRECT_OTHER"
+                            note  = f"Redirected to {redirect_domain} [rate-limited]"
+                        return {**entry, "status": label, "code": code, "note": note}
                     else:
                         last_label = "HTTP_429"
                         last_note  = f"Rate limited, final URL: {final_url_429}"
@@ -591,27 +596,12 @@ def check_url_accurate(
     if success_result is not None:
         return success_result
 
-    # Final fallback: Playwright for TIMEOUT / FORBIDDEN / CONNECTION_ERROR
-    # AND for 429 final state — catches maintenance pages (Chile, Lithuania, etc.)
-    # that rate-limit before body is readable.
-    trigger_browser = last_label in ("TIMEOUT", "FORBIDDEN", "CONNECTION_ERROR") or last_429
-    if trigger_browser:
+    # Final fallback: Playwright for TIMEOUT / FORBIDDEN / CONNECTION_ERROR.
+    # Note: 429 with a known redirect domain now returns early (above).
+    # Only pure HTTP_429 (no redirect info) reaches here.
+    trigger_browser = last_label in ("TIMEOUT", "FORBIDDEN", "CONNECTION_ERROR")
+    if trigger_browser or (last_429 and last_label == "HTTP_429"):
         pw_code, pw_label, pw_title, pw_body = check_with_playwright(url, args.timeout)
-
-        # Playwright itself got rate-limited (empty title + 429 code).
-        # Wait 30-60s and retry once more — the IP cooldown window is usually
-        # short enough that a single patient retry succeeds.
-        pw_still_blocked = (
-            pw_label == "HTTP_429"
-            or (pw_code and pw_code == 429)
-            or (pw_label not in ("BROWSER_ERROR",) and not pw_title.strip() and last_429)
-        )
-        if pw_still_blocked:
-            wait = random.uniform(15, 25)
-            print(f"  [429-deep] {url} — Playwright also blocked, waiting {wait:.0f}s for second chance...")
-            time.sleep(wait)
-            pw_code, pw_label, pw_title, pw_body = check_with_playwright(url, args.timeout)
-
         if pw_label not in ("BROWSER_ERROR",):
             return {**entry, "status": pw_label, "code": pw_code,
                     "note": f"Browser-rendered | Title: {pw_title}"}
