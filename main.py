@@ -454,7 +454,7 @@ def check_url_accurate(
 
                         if is_parked(body_text) or is_parked(title):
                             success_result = {
-                                **entry, "url": try_url, "status": "PARKED",
+                                **entry, "status": "PARKED",
                                 "code": code, "note": "Domain parked / for sale",
                             }
                             break
@@ -463,7 +463,7 @@ def check_url_accurate(
                             pw_code, pw_label, pw_title, pw_body = \
                                 check_with_playwright(url, args.timeout)
                             success_result = {
-                                **entry, "url": try_url, "status": pw_label, "code": pw_code,
+                                **entry, "status": pw_label, "code": pw_code,
                                 "note": f"Bot/CAPTCHA detected | Title: {pw_title}",
                             }
                             break
@@ -480,7 +480,7 @@ def check_url_accurate(
                                 check_with_playwright(url, args.timeout)
                             if pw_label not in ("BROWSER_ERROR", "EMPTY_PAGE"):
                                 success_result = {
-                                    **entry, "url": try_url, "status": pw_label, "code": pw_code,
+                                    **entry, "status": pw_label, "code": pw_code,
                                     "note": f"Browser-rendered | Title: {pw_title}",
                                 }
                                 break
@@ -496,13 +496,12 @@ def check_url_accurate(
                                     result["note"] = "[www. removed] " + result.get("note", "")
 
                         success_result = result
-                        success_result["url"] = try_url
                         break
                     else:
                         note = f"Content-Type: {content_type}"
                         if www_stripped:
                             note = "[www. removed] " + note
-                        success_result = {**entry, "url": try_url, "status": "OK", "code": code, "note": note}
+                        success_result = {**entry, "status": "OK", "code": code, "note": note}
                         break
 
                 # --- non-2xx ---
@@ -553,11 +552,10 @@ def check_url_accurate(
                                     self.headers     = {}
                             result = classify_response(entry, url, MockResponse(pw_code),
                                                        url, pw_title, pw_body)
-                            result["url"] = try_url
                             success_result = result
                         else:
                             success_result = {
-                                **entry, "url": try_url, "status": pw_label, "code": pw_code,
+                                **entry, "status": pw_label, "code": pw_code,
                                 "note": f"Status {pw_code} | Title: {pw_title}",
                             }
                         break
@@ -577,9 +575,47 @@ def check_url_accurate(
                     last_note  = f"Status {code}"
 
             except (httpx.TimeoutException, httpx.ConnectError) as e:
+                err_str    = str(e)
                 last_label = "TIMEOUT" if isinstance(e, httpx.TimeoutException) \
                              else "CONNECTION_ERROR"
-                last_note  = str(e)[:50]
+                last_note  = err_str[:50]
+
+                # SSL certificate failure — retry once with verify=False so we can
+                # still read the page content (e.g. Chile/Lithuania maintenance pages).
+                # We flag the result with SSL_ERROR so the report stays honest.
+                is_ssl_error = (
+                    isinstance(e, httpx.ConnectError) and (
+                        "CERTIFICATE_VERIFY_FAILED" in err_str
+                        or "SSL" in err_str
+                        or "certificate" in err_str.lower()
+                    )
+                )
+                if is_ssl_error:
+                    try:
+                        with httpx.Client(
+                            verify=False,
+                            timeout=args.timeout,
+                            headers=rotated_headers,
+                            follow_redirects=True,
+                        ) as insecure_client:
+                            r2        = insecure_client.get(try_url)
+                            code2     = r2.status_code
+                            if "text/html" in r2.headers.get("content-type", ""):
+                                soup2      = BeautifulSoup(r2.text, "html.parser")
+                                title2     = soup2.title.get_text(strip=True) if soup2.title else ""
+                                body_text2 = soup2.get_text(strip=True)
+                                if is_maintenance(body_text2) or is_maintenance(title2):
+                                    success_result = {
+                                        **entry, "url": try_url,
+                                        "status": "MAINTENANCE",
+                                        "code": code2,
+                                        "note": f"SSL_ERROR (cert invalid) — page readable | "
+                                                f"Title: {title2}",
+                                    }
+                                    break
+                    except Exception:
+                        pass  # SSL bypass also failed — fall through
+
                 if attempt < args.retries:
                     should_retry = True
                 break
