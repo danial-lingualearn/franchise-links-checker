@@ -454,7 +454,7 @@ def check_url_accurate(
 
                         if is_parked(body_text) or is_parked(title):
                             success_result = {
-                                **entry, "status": "PARKED",
+                                **entry, "url": try_url, "status": "PARKED",
                                 "code": code, "note": "Domain parked / for sale",
                             }
                             break
@@ -463,7 +463,7 @@ def check_url_accurate(
                             pw_code, pw_label, pw_title, pw_body = \
                                 check_with_playwright(url, args.timeout)
                             success_result = {
-                                **entry, "status": pw_label, "code": pw_code,
+                                **entry, "url": try_url, "status": pw_label, "code": pw_code,
                                 "note": f"Bot/CAPTCHA detected | Title: {pw_title}",
                             }
                             break
@@ -480,7 +480,7 @@ def check_url_accurate(
                                 check_with_playwright(url, args.timeout)
                             if pw_label not in ("BROWSER_ERROR", "EMPTY_PAGE"):
                                 success_result = {
-                                    **entry, "status": pw_label, "code": pw_code,
+                                    **entry, "url": try_url, "status": pw_label, "code": pw_code,
                                     "note": f"Browser-rendered | Title: {pw_title}",
                                 }
                                 break
@@ -496,12 +496,13 @@ def check_url_accurate(
                                     result["note"] = "[www. removed] " + result.get("note", "")
 
                         success_result = result
+                        success_result["url"] = try_url
                         break
                     else:
                         note = f"Content-Type: {content_type}"
                         if www_stripped:
                             note = "[www. removed] " + note
-                        success_result = {**entry, "status": "OK", "code": code, "note": note}
+                        success_result = {**entry, "url": try_url, "status": "OK", "code": code, "note": note}
                         break
 
                 # --- non-2xx ---
@@ -552,10 +553,11 @@ def check_url_accurate(
                                     self.headers     = {}
                             result = classify_response(entry, url, MockResponse(pw_code),
                                                        url, pw_title, pw_body)
+                            result["url"] = try_url
                             success_result = result
                         else:
                             success_result = {
-                                **entry, "status": pw_label, "code": pw_code,
+                                **entry, "url": try_url, "status": pw_label, "code": pw_code,
                                 "note": f"Status {pw_code} | Title: {pw_title}",
                             }
                         break
