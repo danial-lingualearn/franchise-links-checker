@@ -616,6 +616,13 @@ def check_url_accurate(
                     except Exception:
                         pass  # SSL bypass also failed — fall through
 
+                    # httpx (even with verify=False) was blocked by the server.
+                    # Keep last_label = CONNECTION_ERROR so the final Playwright
+                    # fallback fires — Playwright renders as a real browser and
+                    # bypasses the server's bot/host check that blocks plain httpx.
+                    if success_result is None:
+                        last_note = "SSL_ERROR — httpx blocked, escalating to Playwright"
+
                 if success_result is None and attempt < args.retries:
                     should_retry = True
                 break
@@ -641,8 +648,9 @@ def check_url_accurate(
     if trigger_browser or (last_429 and last_label == "HTTP_429"):
         pw_code, pw_label, pw_title, pw_body = check_with_playwright(url, args.timeout)
         if pw_label not in ("BROWSER_ERROR",):
+            ssl_prefix = "SSL_ERROR (cert invalid) — " if "SSL_ERROR" in last_note else ""
             return {**entry, "status": pw_label, "code": pw_code,
-                    "note": f"Browser-rendered | Title: {pw_title}"}
+                    "note": f"{ssl_prefix}Browser-rendered | Title: {pw_title}"}
 
     return {**entry, "status": last_label, "code": last_code,
             "note": last_note or entry.get("note", "")}
