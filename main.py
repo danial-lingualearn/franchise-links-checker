@@ -616,7 +616,7 @@ def check_url_accurate(
                     except Exception:
                         pass  # SSL bypass also failed — fall through
 
-                if attempt < args.retries:
+                if success_result is None and attempt < args.retries:
                     should_retry = True
                 break
 
