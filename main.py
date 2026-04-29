@@ -613,6 +613,18 @@ def check_url_accurate(
                                                 f"Title: {title2}",
                                     }
                                     break
+                                else:
+                                    # Page readable but not maintenance — run full
+                                    # classification (OK / REDIRECT / BRAND_MISMATCH etc.)
+                                    result = classify_response(
+                                        entry, try_url, r2, str(r2.url), title2, body_text2
+                                    )
+                                    result["note"] = (
+                                        "SSL_ERROR (cert invalid) — page readable | "
+                                        + result.get("note", "")
+                                    )
+                                    success_result = result
+                                    break
                     except Exception:
                         pass  # SSL bypass also failed — fall through
 
