@@ -612,7 +612,6 @@ def check_url_accurate(
                             # 2. The bare domain (strips www. — some servers block www but
                             #    allow the bare domain directly, e.g. Chile, Lithuania)
                             if not r2.text.strip():
-                                from urllib.parse import urlparse, urlunparse
                                 p = urlparse(try_url)
                                 bare = urlunparse(p._replace(
                                     netloc=p.netloc[4:] if p.netloc.startswith("www.") else p.netloc
