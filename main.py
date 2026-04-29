@@ -829,7 +829,9 @@ def run() -> None:
         output_file = args.output
     else:
         timestamp   = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_file = f"{config.DEFAULT_OUTPUT_BASE}_{timestamp}.csv"
+        # Save to data/ folder for dashboard integration
+        os.makedirs("data", exist_ok=True)
+        output_file = f"data/{config.DEFAULT_OUTPUT_BASE}_{timestamp}.csv"
 
     with open(output_file, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=["country", "url", "status", "code", "note"])
