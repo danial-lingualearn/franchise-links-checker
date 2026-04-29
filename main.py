@@ -478,12 +478,17 @@ def check_url_accurate(
                         if result.get("status") == "EMPTY_PAGE":
                             pw_code, pw_label, pw_title, pw_body = \
                                 check_with_playwright(url, args.timeout)
-                            if pw_label not in ("BROWSER_ERROR", "EMPTY_PAGE"):
+                            if pw_label not in ("BROWSER_ERROR", "EMPTY_PAGE", "BOT_BLOCKED"):
+                                # Playwright got real content — use it
                                 success_result = {
                                     **entry, "status": pw_label, "code": pw_code,
                                     "note": f"Browser-rendered | Title: {pw_title}",
                                 }
                                 break
+                            # Playwright was blocked (BOT_BLOCKED/Robot Challenge) or also
+                            # empty. The httpx 202 result is more reliable — site is
+                            # reachable, just throttling the scanner. Fall through to store
+                            # the original classify_response result.
 
                         # No title from httpx — get rendered title via Playwright
                         if not title and code < 400 and result.get("status") != "EMPTY_PAGE":
@@ -604,9 +609,11 @@ def check_url_accurate(
                                 soup2      = BeautifulSoup(r2.text, "html.parser")
                                 title2     = soup2.title.get_text(strip=True) if soup2.title else ""
                                 body_text2 = soup2.get_text(strip=True)
+                                # Read the final URL after redirects (e.g. www→bare domain)
+                                final_url2 = str(r2.url)
                                 if is_maintenance(body_text2) or is_maintenance(title2):
                                     success_result = {
-                                        **entry, "url": try_url,
+                                        **entry, "url": final_url2,
                                         "status": "MAINTENANCE",
                                         "code": code2,
                                         "note": f"SSL_ERROR (cert invalid) — page readable | "
@@ -614,16 +621,15 @@ def check_url_accurate(
                                     }
                                     break
                                 else:
-                                    # Page readable but not maintenance — run full
-                                    # classification (OK / REDIRECT / BRAND_MISMATCH etc.)
-                                    result = classify_response(
-                                        entry, try_url, r2, str(r2.url), title2, body_text2
+                                    # Page readable but not maintenance — full classification
+                                    result2 = classify_response(
+                                        entry, try_url, r2, final_url2, title2, body_text2
                                     )
-                                    result["note"] = (
+                                    result2["note"] = (
                                         "SSL_ERROR (cert invalid) — page readable | "
-                                        + result.get("note", "")
+                                        + result2.get("note", "")
                                     )
-                                    success_result = result
+                                    success_result = result2
                                     break
                     except Exception:
                         pass  # SSL bypass also failed — fall through
