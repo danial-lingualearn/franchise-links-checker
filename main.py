@@ -604,13 +604,35 @@ def check_url_accurate(
                             follow_redirects=True,
                         ) as insecure_client:
                             r2        = insecure_client.get(try_url)
+                            final_url2 = str(r2.url)
                             code2     = r2.status_code
+
+                            # If body is empty, try two fallback URLs in order:
+                            # 1. The final redirect destination (may differ from try_url)
+                            # 2. The bare domain (strips www. — some servers block www but
+                            #    allow the bare domain directly, e.g. Chile, Lithuania)
+                            if not r2.text.strip():
+                                from urllib.parse import urlparse, urlunparse
+                                p = urlparse(try_url)
+                                bare = urlunparse(p._replace(
+                                    netloc=p.netloc[4:] if p.netloc.startswith("www.") else p.netloc
+                                ))
+                                for fallback_url in [final_url2, bare]:
+                                    if fallback_url == try_url:
+                                        continue
+                                    try:
+                                        r2        = insecure_client.get(fallback_url)
+                                        final_url2 = str(r2.url)
+                                        code2     = r2.status_code
+                                        if r2.text.strip():
+                                            break
+                                    except Exception:
+                                        pass
+
                             if "text/html" in r2.headers.get("content-type", ""):
                                 soup2      = BeautifulSoup(r2.text, "html.parser")
                                 title2     = soup2.title.get_text(strip=True) if soup2.title else ""
                                 body_text2 = soup2.get_text(strip=True)
-                                # Read the final URL after redirects (e.g. www→bare domain)
-                                final_url2 = str(r2.url)
                                 if is_maintenance(body_text2) or is_maintenance(title2):
                                     success_result = {
                                         **entry, "url": final_url2,
