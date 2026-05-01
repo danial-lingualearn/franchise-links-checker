@@ -1,4 +1,4 @@
-# Franchise Links Dashboard
+# Lingua Learn Franchise Links Dashboard
 
 Automated daily franchise link scanning with a web-based dashboard for viewing results and downloading reports.
 
@@ -28,7 +28,8 @@ Your dashboard will be live at `https://your-repo-name.streamlit.app`
 
 ### 2. Configure Email Notifications (Optional)
 
-In Streamlit Cloud dashboard settings, add these secrets:
+In the GitHub repository, add these as **Actions secrets** under
+`Settings` -> `Secrets and variables` -> `Actions`:
 
 | Secret | Description |
 |--------|-------------|
@@ -57,7 +58,7 @@ In Streamlit Cloud dashboard settings, add these secrets:
 
 ```bash
 # Clone repository
-git clone https://github.com/your-username/franchise-links-checker.git
+git clone https://github.com/danial-lingualearn/franchise-links-checker.git
 cd franchise-links-checker
 
 # Install dependencies
@@ -90,8 +91,7 @@ Dashboard opens at `http://localhost:8501`
 franchise-links-checker/
 ├── .github/
 │   └── workflows/
-│       ├── daily-scan.yml      # Daily scan + auto-commit
-│       └── daily-links-check.yml # Legacy workflow (can remove)
+│       └── daily-scan.yml      # Daily scan + auto-commit
 ├── .streamlit/
 │   ├── config.toml             # Streamlit theme config
 │   └── secrets.toml.example    # Email config template

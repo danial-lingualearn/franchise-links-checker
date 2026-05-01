@@ -14,11 +14,11 @@ import streamlit as st
 
 
 DATA_DIR = "data"
-CSV_PATTERN = os.path.join(DATA_DIR, "Franchise_Links_Report_*.csv")
-DOMAIN_HEALTH_PATTERN = os.path.join(DATA_DIR, "Domain_Health_*.csv")
+FRANCHISE_REPORT_PATTERN = os.path.join(DATA_DIR, "Franchise_Links_Report_*.csv")
+DOMAIN_HEALTH_REPORT_PATTERN = os.path.join(DATA_DIR, "Domain_Health_*.csv")
 
-REDIRECT_MAIN = "REDIRECT_MAIN"
-REDIRECT_OTHER = "REDIRECT_OTHER"
+STATUS_REDIRECT_MAIN = "REDIRECT_MAIN"
+STATUS_REDIRECT_OTHER = "REDIRECT_OTHER"
 OK_STATUSES = {"OK"}
 ATTENTION_STATUSES = {
     "BRAND_MISMATCH",
@@ -116,20 +116,20 @@ def inject_styles() -> None:
     )
 
 
-def get_scan_files() -> list[str]:
-    files = glob.glob(CSV_PATTERN)
-    files.sort(reverse=True)
-    return files
+def get_franchise_report_files() -> list[str]:
+    report_files = glob.glob(FRANCHISE_REPORT_PATTERN)
+    report_files.sort(reverse=True)
+    return report_files
 
 
-def get_domain_health_files() -> list[str]:
-    files = glob.glob(DOMAIN_HEALTH_PATTERN)
-    files.sort(reverse=True)
-    return files
+def get_domain_health_report_files() -> list[str]:
+    report_files = glob.glob(DOMAIN_HEALTH_REPORT_PATTERN)
+    report_files.sort(reverse=True)
+    return report_files
 
 
-def extract_date_from_filename(filename: str) -> str:
-    match = re.search(r"(\d{8}_\d{6})", os.path.basename(filename))
+def extract_report_timestamp(report_path: str) -> str:
+    match = re.search(r"(\d{8}_\d{6})", os.path.basename(report_path))
     if not match:
         return "Unknown"
 
@@ -141,8 +141,8 @@ def extract_date_from_filename(filename: str) -> str:
     return dt.strftime("%-d %b %Y, %H:%M")
 
 
-def load_csv(filepath: str) -> pd.DataFrame:
-    return pd.read_csv(filepath)
+def load_report_csv(report_path: str) -> pd.DataFrame:
+    return pd.read_csv(report_path)
 
 
 def normalize_status(value: object) -> str:
@@ -161,9 +161,9 @@ def domain_from_url(url: object) -> str:
 def classify_badge(status: str) -> str:
     if status in OK_STATUSES:
         return "green"
-    if status == REDIRECT_OTHER:
+    if status == STATUS_REDIRECT_OTHER:
         return "blue"
-    if status in {REDIRECT_MAIN, "COMING_SOON", "MAINTENANCE", "EMPTY_PAGE"}:
+    if status in {STATUS_REDIRECT_MAIN, "COMING_SOON", "MAINTENANCE", "EMPTY_PAGE"}:
         return "amber"
     if status == "UNKNOWN":
         return "gray"
@@ -174,8 +174,8 @@ def humanize_status(status: str) -> str:
     return status.replace("_", " ").title()
 
 
-def enrich_results(df: pd.DataFrame) -> pd.DataFrame:
-    enriched = df.copy()
+def enrich_results(report_df: pd.DataFrame) -> pd.DataFrame:
+    enriched = report_df.copy()
     if "status" not in enriched.columns:
         enriched["status"] = "UNKNOWN"
     if "url" not in enriched.columns:
@@ -190,16 +190,20 @@ def enrich_results(df: pd.DataFrame) -> pd.DataFrame:
     return enriched
 
 
-def compute_summary(df: pd.DataFrame) -> dict[str, int]:
-    statuses = df["status"] if "status" in df.columns else pd.Series(dtype=str)
+def compute_summary(report_df: pd.DataFrame) -> dict[str, int]:
+    statuses = report_df["status"] if "status" in report_df.columns else pd.Series(dtype=str)
     status_counts = statuses.map(normalize_status).value_counts().to_dict()
-    total = len(df)
+    total = len(report_df)
     coming_soon = status_counts.get("COMING_SOON", 0)
-    redirect_main = status_counts.get(REDIRECT_MAIN, 0)
-    redirect_other = status_counts.get(REDIRECT_OTHER, 0)
+    redirect_main = status_counts.get(STATUS_REDIRECT_MAIN, 0)
+    redirect_other = status_counts.get(STATUS_REDIRECT_OTHER, 0)
     ok = sum(status_counts.get(status, 0) for status in OK_STATUSES)
 
-    known_non_issue = OK_STATUSES | {REDIRECT_MAIN, REDIRECT_OTHER, "COMING_SOON"}
+    known_non_issue = OK_STATUSES | {
+        STATUS_REDIRECT_MAIN,
+        STATUS_REDIRECT_OTHER,
+        "COMING_SOON",
+    }
     issues = sum(
         count
         for status, count in status_counts.items()
@@ -226,13 +230,17 @@ def status_badge(status: str) -> str:
     return f'<span class="badge badge-{color}">{humanize_status(status)}</span>'
 
 
-def render_html_table(df: pd.DataFrame, columns: list[tuple[str, str]], limit: int = 20) -> None:
-    if df.empty:
+def render_html_table(
+    table_df: pd.DataFrame,
+    columns: list[tuple[str, str]],
+    limit: int = 20,
+) -> None:
+    if table_df.empty:
         st.caption("No matching rows in this scan.")
         return
 
     rows = []
-    for _, row in df.head(limit).iterrows():
+    for _, row in table_df.head(limit).iterrows():
         cells = []
         for source, label in columns:
             value = row.get(source, "")
@@ -270,18 +278,32 @@ def render_domain_health_placeholder() -> None:
     )
 
 
-def render_domain_health(filepath: str) -> None:
-    df = load_csv(filepath)
-    section_label(f"Domain overview - {extract_date_from_filename(filepath)}")
+def render_domain_health(report_path: str) -> None:
+    domain_health_df = load_report_csv(report_path)
+    section_label(f"Domain overview - {extract_report_timestamp(report_path)}")
 
-    online = len(df[df.get("status", "") == "ONLINE"]) if "status" in df.columns else 0
-    offline = len(df[df.get("status", "") == "OFFLINE"]) if "status" in df.columns else 0
-    ssl_expiring = (
-        len(df[pd.to_numeric(df.get("ssl_days_left"), errors="coerce") < 60])
-        if "ssl_days_left" in df.columns
+    online = (
+        len(domain_health_df[domain_health_df.get("status", "") == "ONLINE"])
+        if "status" in domain_health_df.columns
         else 0
     )
-    skipped = len(df[df.get("domain", "") == ""]) if "domain" in df.columns else 0
+    offline = (
+        len(domain_health_df[domain_health_df.get("status", "") == "OFFLINE"])
+        if "status" in domain_health_df.columns
+        else 0
+    )
+    ssl_expiring = (
+        len(domain_health_df[
+            pd.to_numeric(domain_health_df.get("ssl_days_left"), errors="coerce") < 60
+        ])
+        if "ssl_days_left" in domain_health_df.columns
+        else 0
+    )
+    skipped = (
+        len(domain_health_df[domain_health_df.get("domain", "") == ""])
+        if "domain" in domain_health_df.columns
+        else 0
+    )
 
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Online", online)
@@ -295,37 +317,37 @@ def main() -> None:
 
     st.title("Lingua Learn Scan Dashboard")
 
-    files = get_scan_files()
-    domain_files = get_domain_health_files()
+    franchise_report_files = get_franchise_report_files()
+    domain_health_report_files = get_domain_health_report_files()
 
     with st.sidebar:
         st.header("Scans")
-        if files:
-            selected_file = st.selectbox(
+        if franchise_report_files:
+            selected_report_path = st.selectbox(
                 "Franchise scan",
-                files,
-                format_func=extract_date_from_filename,
+                franchise_report_files,
+                format_func=extract_report_timestamp,
             )
         else:
-            selected_file = None
+            selected_report_path = None
         st.caption("Daily reports are expected in `data/`.")
 
-    if domain_files:
-        render_domain_health(domain_files[0])
+    if domain_health_report_files:
+        render_domain_health(domain_health_report_files[0])
     else:
         render_domain_health_placeholder()
 
     st.divider()
 
-    if not selected_file:
+    if not selected_report_path:
         section_label("Franchise link checker")
         st.warning("No scan results found yet.")
         st.code("python main.py --use-browser", language="bash")
         return
 
-    df = enrich_results(load_csv(selected_file))
-    scan_date = extract_date_from_filename(selected_file)
-    summary = compute_summary(df)
+    report_df = enrich_results(load_report_csv(selected_report_path))
+    scan_date = extract_report_timestamp(selected_report_path)
+    summary = compute_summary(report_df)
 
     section_label(f"Franchise link checker - {summary['total']} entries scanned - {scan_date}")
     col1, col2, col3, col4 = st.columns(4)
@@ -334,21 +356,26 @@ def main() -> None:
     col3.metric("Redirect -> .com", summary["redirect_main"])
     col4.metric("Issues", summary["issues"])
 
-    csv_bytes = df.to_csv(index=False).encode("utf-8")
+    csv_bytes = report_df.to_csv(index=False).encode("utf-8")
     st.download_button(
         "Download CSV",
         data=csv_bytes,
-        file_name=os.path.basename(selected_file),
+        file_name=os.path.basename(selected_report_path),
         mime="text/csv",
     )
 
-    issue_mask = ~df["status"].isin([*OK_STATUSES, REDIRECT_MAIN, REDIRECT_OTHER, "COMING_SOON"])
-    issues_df = df[issue_mask].copy()
-    redirect_main_df = df[df["status"] == REDIRECT_MAIN].copy()
+    issue_mask = ~report_df["status"].isin([
+        *OK_STATUSES,
+        STATUS_REDIRECT_MAIN,
+        STATUS_REDIRECT_OTHER,
+        "COMING_SOON",
+    ])
+    issue_report_df = report_df[issue_mask].copy()
+    primary_redirect_df = report_df[report_df["status"] == STATUS_REDIRECT_MAIN].copy()
 
     section_label("Franchise issues - sites needing attention")
     render_html_table(
-        issues_df,
+        issue_report_df,
         [
             ("country", "Country"),
             ("domain", "Domain"),
@@ -359,7 +386,7 @@ def main() -> None:
 
     section_label("Inactive franchises - local domain redirecting to lingua-learn.com")
     render_html_table(
-        redirect_main_df,
+        primary_redirect_df,
         [
             ("country", "Country"),
             ("domain", "Domain"),
@@ -368,16 +395,16 @@ def main() -> None:
     )
 
     section_label("Browse results")
-    all_statuses = sorted(df["status"].dropna().unique())
+    all_statuses = sorted(report_df["status"].dropna().unique())
     status_filter = st.multiselect("Status", all_statuses, default=all_statuses)
-    filtered = df[df["status"].isin(status_filter)]
+    filtered_report_df = report_df[report_df["status"].isin(status_filter)]
 
-    all_countries = sorted(filtered["country"].dropna().unique())
+    all_countries = sorted(filtered_report_df["country"].dropna().unique())
     country_filter = st.multiselect("Country", all_countries, default=all_countries)
-    filtered = filtered[filtered["country"].isin(country_filter)]
+    filtered_report_df = filtered_report_df[filtered_report_df["country"].isin(country_filter)]
 
     st.dataframe(
-        filtered[["country", "domain", "url", "status", "code", "note"]],
+        filtered_report_df[["country", "domain", "url", "status", "code", "note"]],
         use_container_width=True,
         hide_index=True,
         column_config={
@@ -392,17 +419,17 @@ def main() -> None:
 
     section_label("Scan history")
     history_rows = []
-    for path in files[:10]:
-        temp_df = enrich_results(load_csv(path))
-        temp_summary = compute_summary(temp_df)
+    for report_path in franchise_report_files[:10]:
+        historical_report_df = enrich_results(load_report_csv(report_path))
+        historical_summary = compute_summary(historical_report_df)
         history_rows.append(
             {
-                "Date": extract_date_from_filename(path),
-                "Entries": temp_summary["total"],
-                "OK": temp_summary["ok"],
-                "Redirect -> .com": temp_summary["redirect_main"],
-                "Redirect local": temp_summary["redirect_other"],
-                "Issues": temp_summary["issues"],
+                "Date": extract_report_timestamp(report_path),
+                "Entries": historical_summary["total"],
+                "OK": historical_summary["ok"],
+                "Redirect -> .com": historical_summary["redirect_main"],
+                "Redirect local": historical_summary["redirect_other"],
+                "Issues": historical_summary["issues"],
             }
         )
     st.dataframe(pd.DataFrame(history_rows), use_container_width=True, hide_index=True)

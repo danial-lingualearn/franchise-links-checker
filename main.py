@@ -7,7 +7,7 @@ Key design decisions (derived from multi-run empirical data):
                   removed all 429 errors in every clean run
   - Playwright required  →  hard import; always available in CI
   - httpx-first page extraction with Playwright fallback
-  - MAINTENANCE has priority over REDIRECT in classify_response
+  - MAINTENANCE has priority over REDIRECT in classify_http_response
   - 429 final state always triggers Playwright (catches MAINTENANCE pages
     that rate-limit before body is readable — e.g. Chile, Lithuania)
   - Exponential backoff with jitter on retries
@@ -47,7 +47,7 @@ from playwright.sync_api import sync_playwright
 # Config
 # ---------------------------------------------------------------------------
 
-class Config:
+class ScannerConfig:
     DEFAULT_URL         = "https://lingua-learn.com/franchise/"
     DEFAULT_OUTPUT_BASE = "Franchise_Links_Report"
     DEFAULT_TIMEOUT     = 25      # generous for slow TLDs
@@ -90,7 +90,26 @@ class Config:
     }
 
 
-config = Config()
+SCANNER_CONFIG = ScannerConfig()
+
+STATUS_OK = "OK"
+STATUS_COMING_SOON = "COMING_SOON"
+STATUS_REDIRECT_MAIN = "REDIRECT_MAIN"
+STATUS_REDIRECT_OTHER = "REDIRECT_OTHER"
+STATUS_MAINTENANCE = "MAINTENANCE"
+STATUS_PARKED = "PARKED"
+STATUS_BOT_BLOCKED = "BOT_BLOCKED"
+STATUS_EMPTY_PAGE = "EMPTY_PAGE"
+STATUS_BRAND_MISMATCH = "BRAND_MISMATCH"
+STATUS_BROWSER_ERROR = "BROWSER_ERROR"
+STATUS_CONNECTION_ERROR = "CONNECTION_ERROR"
+STATUS_FORBIDDEN = "FORBIDDEN"
+STATUS_NOT_FOUND = "NOT_FOUND"
+STATUS_REQUEST_ERROR = "REQUEST_ERROR"
+STATUS_TIMEOUT = "TIMEOUT"
+STATUS_UNHANDLED_ERROR = "UNHANDLED_ERROR"
+
+REPORT_COLUMNS = ["country", "url", "status", "code", "note"]
 
 MAINTENANCE_PHRASES = [
     "scheduled maintenance",
@@ -153,14 +172,14 @@ def is_maintenance(text: str) -> bool:
 
 def is_bot_blocked(title: str, body_text: str) -> bool:
     combined = (title + " " + body_text).lower()
-    return any(p in combined for p in config.BOT_DETECTION_PHRASES)
+    return any(p in combined for p in SCANNER_CONFIG.BOT_DETECTION_PHRASES)
 
 
 # ---------------------------------------------------------------------------
 # Page extraction  (httpx-first, Playwright fallback)
 # ---------------------------------------------------------------------------
 
-def extract_urls(page_url: str) -> List[Dict[str, Any]]:
+def extract_franchise_entries(page_url: str) -> List[Dict[str, Any]]:
     """Fetch the franchise listing page and extract all 'Visit Website' links.
 
     Tries plain httpx first (fast, no Playwright startup).
@@ -168,14 +187,14 @@ def extract_urls(page_url: str) -> List[Dict[str, Any]]:
     links found via httpx).
     """
     html       = _fetch_html_httpx(page_url)
-    entries    = _parse_entries(html, page_url)
-    live_count = sum(1 for e in entries if e.get("status") != "COMING_SOON")
+    entries    = _parse_franchise_entries(html, page_url)
+    live_count = sum(1 for entry in entries if entry.get("status") != STATUS_COMING_SOON)
 
     if live_count == 0:
         print("httpx found no live links — retrying with Playwright...")
         html       = _fetch_html_playwright(page_url)
-        entries    = _parse_entries(html, page_url)
-        live_count = sum(1 for e in entries if e.get("status") != "COMING_SOON")
+        entries    = _parse_franchise_entries(html, page_url)
+        live_count = sum(1 for entry in entries if entry.get("status") != STATUS_COMING_SOON)
 
     print(f"Found {len(entries)} entries: {live_count} live, "
           f"{len(entries) - live_count} coming soon.")
@@ -187,8 +206,8 @@ def extract_urls(page_url: str) -> List[Dict[str, Any]]:
 def _fetch_html_httpx(url: str) -> str:
     try:
         with httpx.Client(
-            timeout=config.DEFAULT_TIMEOUT,
-            headers=config.HEADERS,
+            timeout=SCANNER_CONFIG.DEFAULT_TIMEOUT,
+            headers=SCANNER_CONFIG.HEADERS,
             follow_redirects=True,
         ) as client:
             resp = client.get(url)
@@ -205,7 +224,7 @@ def _fetch_html_playwright(url: str) -> str:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
             try:
-                context = browser.new_context(user_agent=config.HEADERS["User-Agent"])
+                context = browser.new_context(user_agent=SCANNER_CONFIG.HEADERS["User-Agent"])
                 page    = context.new_page()
                 page.goto(url, timeout=60_000, wait_until="domcontentloaded")
                 for _ in range(3):
@@ -222,24 +241,24 @@ def _fetch_html_playwright(url: str) -> str:
         raise RuntimeError(f"Playwright failed to load page: {e}") from e
 
 
-def _parse_entries(html: str, page_url: str) -> List[Dict[str, Any]]:
+def _parse_franchise_entries(html: str, page_url: str) -> List[Dict[str, Any]]:
     if not html:
         return []
     soup    = BeautifulSoup(html, "html.parser")
     seen: set = set()
     entries   = []
 
-    for a in soup.find_all("a", href=True):
-        if not a.get_text(strip=True).lower().endswith("visit website"):
+    for link_element in soup.find_all("a", href=True):
+        if not link_element.get_text(strip=True).lower().endswith("visit website"):
             continue
 
-        href    = a["href"].strip()
-        country = _extract_country(a)
+        href    = link_element["href"].strip()
+        country = _extract_country(link_element)
 
         if not href or href == "#":
             entries.append({
                 "country": country, "url": "#",
-                "status": "COMING_SOON", "code": None, "note": "COMING_SOON",
+                "status": STATUS_COMING_SOON, "code": None, "note": STATUS_COMING_SOON,
             })
             continue
 
@@ -251,7 +270,7 @@ def _parse_entries(html: str, page_url: str) -> List[Dict[str, Any]]:
         ):
             entries.append({
                 "country": country, "url": "#",
-                "status": "COMING_SOON", "code": None, "note": "COMING_SOON",
+                "status": STATUS_COMING_SOON, "code": None, "note": STATUS_COMING_SOON,
             })
             continue
 
@@ -285,15 +304,15 @@ def _extract_country(tag) -> str:
 # Playwright fallback checker
 # ---------------------------------------------------------------------------
 
-def check_with_playwright(url: str, timeout: int) -> Tuple[Optional[int], str, str, str]:
+def inspect_url_with_browser(url: str, timeout: int) -> Tuple[Optional[int], str, str, str]:
     """Browser-render a URL and return (status_code, label, title, body_text)."""
     try:
         with sync_playwright() as p:
-            ua      = random.choice(config.USER_AGENTS)
+            user_agent = random.choice(SCANNER_CONFIG.USER_AGENTS)
             browser = p.chromium.launch(headless=True)
             try:
                 context = browser.new_context(
-                    user_agent=ua,
+                    user_agent=user_agent,
                     locale="en-US",
                     timezone_id="America/New_York",
                     viewport={"width": 1280, "height": 800},
@@ -315,27 +334,27 @@ def check_with_playwright(url: str, timeout: int) -> Tuple[Optional[int], str, s
                 body_text = page.locator("body").inner_text()
 
                 if is_parked(body_text) or is_parked(title):
-                    return status, "PARKED", title, body_text
+                    return status, STATUS_PARKED, title, body_text
                 if is_bot_blocked(title, body_text):
-                    return status, "BOT_BLOCKED", title, body_text
+                    return status, STATUS_BOT_BLOCKED, title, body_text
                 if is_maintenance(body_text) or is_maintenance(title):
-                    return status, "MAINTENANCE", title, body_text
-                if status < 400 and len(body_text.strip()) >= config.MIN_CONTENT_LENGTH:
-                    return status, "OK", title, body_text
+                    return status, STATUS_MAINTENANCE, title, body_text
+                if status < 400 and len(body_text.strip()) >= SCANNER_CONFIG.MIN_CONTENT_LENGTH:
+                    return status, STATUS_OK, title, body_text
                 if status < 400:
-                    return status, "EMPTY_PAGE", title, body_text
+                    return status, STATUS_EMPTY_PAGE, title, body_text
                 return status, f"HTTP_{status}", title, body_text
             finally:
                 browser.close()
     except Exception as e:
-        return None, "BROWSER_ERROR", "", str(e)[:80]
+        return None, STATUS_BROWSER_ERROR, "", str(e)[:80]
 
 
 # ---------------------------------------------------------------------------
 # Response classification  (MAINTENANCE has priority over REDIRECT)
 # ---------------------------------------------------------------------------
 
-def classify_response(
+def classify_http_response(
     entry: Dict,
     original_url: str,
     resp: httpx.Response,
@@ -349,23 +368,23 @@ def classify_response(
 
     is_redirect   = final_domain != original_domain
     redirect_note = ""
-    status_label  = "OK"
+    status_label  = STATUS_OK
 
     # Maintenance takes priority — a redirected maintenance page is MAINTENANCE
     if is_maintenance(body_text) or is_maintenance(title):
-        status_label = "MAINTENANCE"
+        status_label = STATUS_MAINTENANCE
     elif is_redirect:
         if final_domain.endswith(".com"):
-            status_label  = "REDIRECT_MAIN"
+            status_label  = STATUS_REDIRECT_MAIN
             redirect_note = f"Redirected to .com ({final_domain})"
         else:
-            status_label  = "REDIRECT_OTHER"
+            status_label  = STATUS_REDIRECT_OTHER
             redirect_note = f"Redirected to {final_domain}"
 
     content_length = len(body_text)
-    is_empty       = content_length < config.MIN_CONTENT_LENGTH
-    if is_empty and status_label == "OK":
-        status_label = "EMPTY_PAGE"
+    is_empty       = content_length < SCANNER_CONFIG.MIN_CONTENT_LENGTH
+    if is_empty and status_label == STATUS_OK:
+        status_label = STATUS_EMPTY_PAGE
 
     notes = []
     if redirect_note:
@@ -374,13 +393,13 @@ def classify_response(
     if is_empty:
         notes.append(
             "Maintenance page (site temporarily down)"
-            if status_label == "MAINTENANCE"
+            if status_label == STATUS_MAINTENANCE
             else f"Low content length ({content_length} chars)"
         )
-    if title and not any(kw in title.lower() for kw in config.BRAND_KEYWORDS):
+    if title and not any(kw in title.lower() for kw in SCANNER_CONFIG.BRAND_KEYWORDS):
         notes.append("Brand mismatch (title doesn't contain 'lingua/learn')")
-        if status_label == "OK":
-            status_label = "BRAND_MISMATCH"
+        if status_label == STATUS_OK:
+            status_label = STATUS_BRAND_MISMATCH
 
     return {
         **entry,
@@ -394,35 +413,38 @@ def classify_response(
 # Per-URL checker
 # ---------------------------------------------------------------------------
 
-def check_url_accurate(
+def scan_franchise_url(
     entry: Dict[str, Any],
     client: httpx.Client,
     args: argparse.Namespace,
     rate_limiter: RateLimiter,
 ) -> Dict[str, Any]:
     url = entry["url"]
-    if entry.get("status") == "COMING_SOON":
+    if entry.get("status") == STATUS_COMING_SOON:
         return entry
 
     rate_limiter.wait()
 
-    rotated_headers = {**config.HEADERS, "User-Agent": random.choice(config.USER_AGENTS)}
+    request_headers = {
+        **SCANNER_CONFIG.HEADERS,
+        "User-Agent": random.choice(SCANNER_CONFIG.USER_AGENTS),
+    }
 
     parsed        = urlparse(url)
-    netloc        = parsed.netloc
-    path_qs       = parsed.path + ("?" + parsed.query if parsed.query else "")
-    has_www       = netloc.lower().startswith("www.")
-    netloc_no_www = netloc[4:] if has_www else netloc
+    original_host = parsed.netloc
+    path_and_query = parsed.path + ("?" + parsed.query if parsed.query else "")
+    has_www_prefix = original_host.lower().startswith("www.")
+    host_without_www = original_host[4:] if has_www_prefix else original_host
 
     urls_to_try = [url]
     if parsed.scheme == "http":
-        urls_to_try.append(f"https://{netloc}{path_qs}")
+        urls_to_try.append(f"https://{original_host}{path_and_query}")
     elif parsed.scheme == "https":
-        urls_to_try.append(f"http://{netloc}{path_qs}")
-    if has_www:
-        urls_to_try.append(f"{parsed.scheme}://{netloc_no_www}{path_qs}")
+        urls_to_try.append(f"http://{original_host}{path_and_query}")
+    if has_www_prefix:
+        urls_to_try.append(f"{parsed.scheme}://{host_without_www}{path_and_query}")
         alt_scheme = "http" if parsed.scheme == "https" else "https"
-        urls_to_try.append(f"{alt_scheme}://{netloc_no_www}{path_qs}")
+        urls_to_try.append(f"{alt_scheme}://{host_without_www}{path_and_query}")
 
     last_code: Optional[int] = None
     last_label  = "ERROR"
@@ -435,17 +457,17 @@ def check_url_accurate(
         if success_result is not None:
             break
 
-        for try_url in urls_to_try:
+        for candidate_url in urls_to_try:
             try:
-                resp      = client.get(try_url, timeout=args.timeout,
-                                       headers=rotated_headers, follow_redirects=True)
+                resp      = client.get(candidate_url, timeout=args.timeout,
+                                       headers=request_headers, follow_redirects=True)
                 code      = resp.status_code
                 final_url = str(resp.url)
 
                 if code < 400:
                     content_type = resp.headers.get("content-type", "")
-                    try_netloc   = urlparse(try_url).netloc
-                    www_stripped = has_www and try_netloc == netloc_no_www
+                    candidate_host = urlparse(candidate_url).netloc
+                    used_non_www_host = has_www_prefix and candidate_host == host_without_www
 
                     if "text/html" in content_type:
                         soup      = BeautifulSoup(resp.text, "html.parser")
@@ -454,59 +476,81 @@ def check_url_accurate(
 
                         if is_parked(body_text) or is_parked(title):
                             success_result = {
-                                **entry, "status": "PARKED",
+                                **entry, "status": STATUS_PARKED,
                                 "code": code, "note": "Domain parked / for sale",
                             }
                             break
 
                         if is_bot_blocked(title, body_text):
-                            pw_code, pw_label, pw_title, pw_body = \
-                                check_with_playwright(url, args.timeout)
+                            if args.use_browser:
+                                browser_code, browser_status, browser_title, browser_body = (
+                                    inspect_url_with_browser(url, args.timeout)
+                                )
+                            else:
+                                browser_code = None
+                                browser_status = STATUS_BOT_BLOCKED
+                                browser_title = title
                             success_result = {
-                                **entry, "status": pw_label, "code": pw_code,
-                                "note": f"Bot/CAPTCHA detected | Title: {pw_title}",
+                                **entry, "status": browser_status, "code": browser_code,
+                                "note": f"Bot/CAPTCHA detected | Title: {browser_title}",
                             }
                             break
 
-                        result = classify_response(entry, url, resp, final_url, title, body_text)
-                        if www_stripped:
+                        result = classify_http_response(
+                            entry,
+                            url,
+                            resp,
+                            final_url,
+                            title,
+                            body_text,
+                        )
+                        if used_non_www_host:
                             result["note"] = "[www. removed] " + result.get("note", "")
 
                         # Empty page — try Playwright for a proper render.
-                        # Covers HTTP 202 too: if the body was empty, classify_response
+                        # Covers HTTP 202 too: if the body was empty, classify_http_response
                         # already set status=EMPTY_PAGE, so this condition catches it.
-                        if result.get("status") == "EMPTY_PAGE":
-                            pw_code, pw_label, pw_title, pw_body = \
-                                check_with_playwright(url, args.timeout)
-                            if pw_label not in ("BROWSER_ERROR", "EMPTY_PAGE", "BOT_BLOCKED"):
+                        if args.use_browser and result.get("status") == STATUS_EMPTY_PAGE:
+                            browser_code, browser_status, browser_title, browser_body = \
+                                inspect_url_with_browser(url, args.timeout)
+                            if browser_status not in (
+                                STATUS_BROWSER_ERROR,
+                                STATUS_EMPTY_PAGE,
+                                STATUS_BOT_BLOCKED,
+                            ):
                                 # Playwright got real content — use it
                                 success_result = {
-                                    **entry, "status": pw_label, "code": pw_code,
-                                    "note": f"Browser-rendered | Title: {pw_title}",
+                                    **entry, "status": browser_status, "code": browser_code,
+                                    "note": f"Browser-rendered | Title: {browser_title}",
                                 }
                                 break
                             # Playwright was blocked (BOT_BLOCKED/Robot Challenge) or also
                             # empty. The httpx 202 result is more reliable — site is
                             # reachable, just throttling the scanner. Fall through to store
-                            # the original classify_response result.
+                            # the original classify_http_response result.
 
                         # No title from httpx — get rendered title via Playwright
-                        if not title and code < 400 and result.get("status") != "EMPTY_PAGE":
-                            pw_code, pw_label, pw_title, pw_body = \
-                                check_with_playwright(url, args.timeout)
-                            if pw_code and pw_code < 400:
-                                result = classify_response(entry, url, resp, final_url,
-                                                           pw_title, pw_body)
-                                if www_stripped:
+                        if (
+                            args.use_browser
+                            and not title
+                            and code < 400
+                            and result.get("status") != STATUS_EMPTY_PAGE
+                        ):
+                            browser_code, browser_status, browser_title, browser_body = \
+                                inspect_url_with_browser(url, args.timeout)
+                            if browser_code and browser_code < 400:
+                                result = classify_http_response(entry, url, resp, final_url,
+                                                                browser_title, browser_body)
+                                if used_non_www_host:
                                     result["note"] = "[www. removed] " + result.get("note", "")
 
                         success_result = result
                         break
                     else:
                         note = f"Content-Type: {content_type}"
-                        if www_stripped:
+                        if used_non_www_host:
                             note = "[www. removed] " + note
-                        success_result = {**entry, "status": "OK", "code": code, "note": note}
+                        success_result = {**entry, "status": STATUS_OK, "code": code, "note": note}
                         break
 
                 # --- non-2xx ---
@@ -515,20 +559,20 @@ def check_url_accurate(
                 if code == 429:
                     last_429      = True
                     final_url_429 = str(resp.url)
-                    orig_domain   = urlparse(url).netloc
+                    original_domain = urlparse(url).netloc
                     location      = resp.headers.get("location", "")
-                    loc_domain    = urlparse(location).netloc if location else ""
+                    location_domain = urlparse(location).netloc if location else ""
                     final_domain_429 = urlparse(final_url_429).netloc
-                    redirect_domain  = loc_domain or final_domain_429
+                    redirect_domain  = location_domain or final_domain_429
 
-                    if redirect_domain and redirect_domain != orig_domain:
+                    if redirect_domain and redirect_domain != original_domain:
                         # We have enough info from headers — classify and return now.
                         # Don't retry or use Playwright; the CDN will keep rate-limiting.
                         if redirect_domain.endswith(".com"):
-                            label = "REDIRECT_MAIN"
+                            label = STATUS_REDIRECT_MAIN
                             note  = f"Redirected to .com ({redirect_domain}) [rate-limited]"
                         else:
-                            label = "REDIRECT_OTHER"
+                            label = STATUS_REDIRECT_OTHER
                             note  = f"Redirected to {redirect_domain} [rate-limited]"
                         return {**entry, "status": label, "code": code, "note": note}
                     else:
@@ -543,31 +587,34 @@ def check_url_accurate(
                     break
 
                 elif code == 403:
-                    last_label = "FORBIDDEN"
+                    last_label = STATUS_FORBIDDEN
                     last_note  = f"Status {code}"
                     # Immediate Playwright fallback for 403 — often just a bot gate
-                    pw_code, pw_label, pw_title, pw_body = \
-                        check_with_playwright(url, args.timeout)
-                    if pw_label not in ("BROWSER_ERROR", "BOT_BLOCKED"):
-                        if pw_code and pw_code < 400:
+                    browser_code, browser_status, browser_title, browser_body = (
+                        inspect_url_with_browser(url, args.timeout)
+                        if args.use_browser
+                        else (None, STATUS_FORBIDDEN, "", "")
+                    )
+                    if browser_status not in (STATUS_BROWSER_ERROR, STATUS_BOT_BLOCKED):
+                        if browser_code and browser_code < 400:
                             class MockResponse:
                                 def __init__(self, status_code):
                                     self.status_code = status_code
                                     self.url         = url
                                     self.headers     = {}
-                            result = classify_response(entry, url, MockResponse(pw_code),
-                                                       url, pw_title, pw_body)
+                            result = classify_http_response(entry, url, MockResponse(browser_code),
+                                                            url, browser_title, browser_body)
                             success_result = result
                         else:
                             success_result = {
-                                **entry, "status": pw_label, "code": pw_code,
-                                "note": f"Status {pw_code} | Title: {pw_title}",
+                                **entry, "status": browser_status, "code": browser_code,
+                                "note": f"Status {browser_code} | Title: {browser_title}",
                             }
                         break
                     last_note = "Status 403 | Playwright: browser error or still blocked"
 
                 elif code == 404:
-                    last_label = "NOT_FOUND"
+                    last_label = STATUS_NOT_FOUND
                     last_note  = f"Status {code}"
                 elif code >= 500:
                     last_label = f"SERVER_ERROR_{code}"
@@ -581,8 +628,8 @@ def check_url_accurate(
 
             except (httpx.TimeoutException, httpx.ConnectError) as e:
                 err_str    = str(e)
-                last_label = "TIMEOUT" if isinstance(e, httpx.TimeoutException) \
-                             else "CONNECTION_ERROR"
+                last_label = STATUS_TIMEOUT if isinstance(e, httpx.TimeoutException) \
+                             else STATUS_CONNECTION_ERROR
                 last_note  = err_str[:50]
 
                 # SSL certificate failure — retry once with verify=False so we can
@@ -600,57 +647,71 @@ def check_url_accurate(
                         with httpx.Client(
                             verify=False,
                             timeout=args.timeout,
-                            headers=rotated_headers,
+                            headers=request_headers,
                             follow_redirects=True,
                         ) as insecure_client:
-                            r2        = insecure_client.get(try_url)
-                            final_url2 = str(r2.url)
-                            code2     = r2.status_code
+                            insecure_response = insecure_client.get(candidate_url)
+                            insecure_final_url = str(insecure_response.url)
+                            insecure_status_code = insecure_response.status_code
 
                             # If body is empty, try two fallback URLs in order:
-                            # 1. The final redirect destination (may differ from try_url)
+                            # 1. The final redirect destination (may differ from candidate_url)
                             # 2. The bare domain (strips www. — some servers block www but
                             #    allow the bare domain directly, e.g. Chile, Lithuania)
-                            if not r2.text.strip():
-                                p = urlparse(try_url)
-                                bare = urlunparse(p._replace(
-                                    netloc=p.netloc[4:] if p.netloc.startswith("www.") else p.netloc
+                            if not insecure_response.text.strip():
+                                parsed_candidate = urlparse(candidate_url)
+                                bare_domain_url = urlunparse(parsed_candidate._replace(
+                                    netloc=parsed_candidate.netloc[4:]
+                                    if parsed_candidate.netloc.startswith("www.")
+                                    else parsed_candidate.netloc
                                 ))
-                                for fallback_url in [final_url2, bare]:
-                                    if fallback_url == try_url:
+                                for fallback_url in [insecure_final_url, bare_domain_url]:
+                                    if fallback_url == candidate_url:
                                         continue
                                     try:
-                                        r2        = insecure_client.get(fallback_url)
-                                        final_url2 = str(r2.url)
-                                        code2     = r2.status_code
-                                        if r2.text.strip():
+                                        insecure_response = insecure_client.get(fallback_url)
+                                        insecure_final_url = str(insecure_response.url)
+                                        insecure_status_code = insecure_response.status_code
+                                        if insecure_response.text.strip():
                                             break
                                     except Exception:
                                         pass
 
-                            if "text/html" in r2.headers.get("content-type", ""):
-                                soup2      = BeautifulSoup(r2.text, "html.parser")
-                                title2     = soup2.title.get_text(strip=True) if soup2.title else ""
-                                body_text2 = soup2.get_text(strip=True)
-                                if is_maintenance(body_text2) or is_maintenance(title2):
+                            if "text/html" in insecure_response.headers.get("content-type", ""):
+                                insecure_soup = BeautifulSoup(insecure_response.text, "html.parser")
+                                insecure_title = (
+                                    insecure_soup.title.get_text(strip=True)
+                                    if insecure_soup.title
+                                    else ""
+                                )
+                                insecure_body_text = insecure_soup.get_text(strip=True)
+                                if (
+                                    is_maintenance(insecure_body_text)
+                                    or is_maintenance(insecure_title)
+                                ):
                                     success_result = {
-                                        **entry, "url": final_url2,
-                                        "status": "MAINTENANCE",
-                                        "code": code2,
+                                        **entry, "url": insecure_final_url,
+                                        "status": STATUS_MAINTENANCE,
+                                        "code": insecure_status_code,
                                         "note": f"SSL_ERROR (cert invalid) — page readable | "
-                                                f"Title: {title2}",
+                                                f"Title: {insecure_title}",
                                     }
                                     break
                                 else:
                                     # Page readable but not maintenance — full classification
-                                    result2 = classify_response(
-                                        entry, try_url, r2, final_url2, title2, body_text2
+                                    insecure_result = classify_http_response(
+                                        entry,
+                                        candidate_url,
+                                        insecure_response,
+                                        insecure_final_url,
+                                        insecure_title,
+                                        insecure_body_text,
                                     )
-                                    result2["note"] = (
+                                    insecure_result["note"] = (
                                         "SSL_ERROR (cert invalid) — page readable | "
-                                        + result2.get("note", "")
+                                        + insecure_result.get("note", "")
                                     )
-                                    success_result = result2
+                                    success_result = insecure_result
                                     break
                     except Exception:
                         pass  # SSL bypass also failed — fall through
@@ -667,7 +728,7 @@ def check_url_accurate(
                 break
 
             except httpx.RequestError as e:
-                last_label = "REQUEST_ERROR"
+                last_label = STATUS_REQUEST_ERROR
                 last_note  = str(e)[:50]
 
         if should_retry:
@@ -683,13 +744,22 @@ def check_url_accurate(
     # Final fallback: Playwright for TIMEOUT / FORBIDDEN / CONNECTION_ERROR.
     # Note: 429 with a known redirect domain now returns early (above).
     # Only pure HTTP_429 (no redirect info) reaches here.
-    trigger_browser = last_label in ("TIMEOUT", "FORBIDDEN", "CONNECTION_ERROR")
-    if trigger_browser or (last_429 and last_label == "HTTP_429"):
-        pw_code, pw_label, pw_title, pw_body = check_with_playwright(url, args.timeout)
-        if pw_label not in ("BROWSER_ERROR",):
+    should_use_browser_fallback = (
+        args.use_browser
+        and (
+            last_label in (STATUS_TIMEOUT, STATUS_FORBIDDEN, STATUS_CONNECTION_ERROR)
+            or (last_429 and last_label == "HTTP_429")
+        )
+    )
+    if should_use_browser_fallback:
+        browser_code, browser_status, browser_title, browser_body = inspect_url_with_browser(
+            url,
+            args.timeout,
+        )
+        if browser_status != STATUS_BROWSER_ERROR:
             ssl_prefix = "SSL_ERROR (cert invalid) — " if "SSL_ERROR" in last_note else ""
-            return {**entry, "status": pw_label, "code": pw_code,
-                    "note": f"{ssl_prefix}Browser-rendered | Title: {pw_title}"}
+            return {**entry, "status": browser_status, "code": browser_code,
+                    "note": f"{ssl_prefix}Browser-rendered | Title: {browser_title}"}
 
     return {**entry, "status": last_label, "code": last_code,
             "note": last_note or entry.get("note", "")}
@@ -717,17 +787,20 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Check franchise links – daily scan edition (production)."
     )
-    parser.add_argument("--url",           default=config.DEFAULT_URL)
+    parser.add_argument("--url",           default=SCANNER_CONFIG.DEFAULT_URL)
     parser.add_argument("--output",        default=None)
-    parser.add_argument("--timeout",       type=positive_int,       default=config.DEFAULT_TIMEOUT)
-    parser.add_argument("--workers",       type=positive_int,       default=config.DEFAULT_MAX_WORKERS)
-    parser.add_argument("--retries",       type=int,                default=config.DEFAULT_RETRIES)
-    parser.add_argument("--rate-limit",    type=non_negative_float, default=config.DEFAULT_RATE_LIMIT)
+    parser.add_argument("--timeout",       type=positive_int,
+                        default=SCANNER_CONFIG.DEFAULT_TIMEOUT)
+    parser.add_argument("--workers",       type=positive_int,
+                        default=SCANNER_CONFIG.DEFAULT_MAX_WORKERS)
+    parser.add_argument("--retries",       type=int,
+                        default=SCANNER_CONFIG.DEFAULT_RETRIES)
+    parser.add_argument("--rate-limit",    type=non_negative_float,
+                        default=SCANNER_CONFIG.DEFAULT_RATE_LIMIT)
     parser.add_argument("--retry-delay",   type=non_negative_float, dest="retry_delay",
-                        default=config.DEFAULT_RETRY_DELAY)
+                        default=SCANNER_CONFIG.DEFAULT_RETRY_DELAY)
     parser.add_argument("--use-browser",   action="store_true",
                         help="Trigger Playwright on TIMEOUT/FORBIDDEN/429 results")
-    parser.add_argument("--fallback-path", type=str, default=None)
     args, _ = parser.parse_known_args()
     return args
 
@@ -798,37 +871,51 @@ def run() -> None:
           f"Retries: {args.retries} | Retry delay: {args.retry_delay}s | "
           f"Browser fallback: {args.use_browser}")
 
-    entries = extract_urls(args.url)
+    entries = extract_franchise_entries(args.url)
     if not entries:
         sys.exit("No 'Visit Website' links found.")
 
-    live    = [e for e in entries if e.get("status") != "COMING_SOON"]
-    soon    = [e for e in entries if e.get("status") == "COMING_SOON"]
-    results = list(soon)
+    live_entries = [
+        (position, entry)
+        for position, entry in enumerate(entries)
+        if entry.get("status") != STATUS_COMING_SOON
+    ]
+    results_by_position: List[Optional[Dict[str, Any]]] = [
+        entry if entry.get("status") == STATUS_COMING_SOON else None
+        for entry in entries
+    ]
     rate_limiter = RateLimiter(args.rate_limit)
 
     with httpx.Client(
         http2=True,
         follow_redirects=True,
-        headers=config.HEADERS,
+        headers=SCANNER_CONFIG.HEADERS,
         limits=httpx.Limits(max_keepalive_connections=5),
     ) as client:
         with ThreadPoolExecutor(max_workers=args.workers) as executor:
             futures = {
-                executor.submit(check_url_accurate, e, client, args, rate_limiter): e
-                for e in live
+                executor.submit(
+                    scan_franchise_url,
+                    entry,
+                    client,
+                    args,
+                    rate_limiter,
+                ): (position, entry)
+                for position, entry in live_entries
             }
             done = 0
             for future in as_completed(futures):
                 done += 1
+                position, entry = futures[future]
                 try:
                     result = future.result()
                 except Exception as exc:
-                    entry  = futures[future]
-                    result = {**entry, "status": "UNHANDLED_ERROR",
+                    result = {**entry, "status": STATUS_UNHANDLED_ERROR,
                               "code": 0, "note": str(exc)[:100]}
-                results.append(result)
-                print(f"  [{done}/{len(live)}] {result['country']} — {result['status']}")
+                results_by_position[position] = result
+                print(f"  [{done}/{len(live_entries)}] {result['country']} — {result['status']}")
+
+    results = [result for result in results_by_position if result is not None]
 
     if args.output:
         output_file = args.output
@@ -836,10 +923,10 @@ def run() -> None:
         timestamp   = datetime.now().strftime("%Y%m%d_%H%M%S")
         # Save to data/ folder for dashboard integration
         os.makedirs("data", exist_ok=True)
-        output_file = f"data/{config.DEFAULT_OUTPUT_BASE}_{timestamp}.csv"
+        output_file = f"data/{SCANNER_CONFIG.DEFAULT_OUTPUT_BASE}_{timestamp}.csv"
 
     with open(output_file, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=["country", "url", "status", "code", "note"])
+        writer = csv.DictWriter(f, fieldnames=REPORT_COLUMNS)
         writer.writeheader()
         writer.writerows(results)
 
