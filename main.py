@@ -768,8 +768,13 @@ def send_email(file_path: str, summary: str) -> None:
         print(f"Failed to attach file: {e}")
         return
 
-    smtp_host = os.environ.get("SMTP_HOST", "smtp.gmail.com")
-    smtp_port = int(os.environ.get("SMTP_PORT", "587"))
+    smtp_host = os.environ.get("SMTP_HOST") or "smtp.gmail.com"
+    smtp_port_raw = os.environ.get("SMTP_PORT") or "587"
+    try:
+        smtp_port = int(smtp_port_raw)
+    except ValueError:
+        print(f"Invalid SMTP_PORT={smtp_port_raw!r}; using default 587.")
+        smtp_port = 587
     try:
         server = smtplib.SMTP(smtp_host, smtp_port)
         server.starttls()
