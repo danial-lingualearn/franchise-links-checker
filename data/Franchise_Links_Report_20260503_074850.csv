@@ -1,0 +1,50 @@
+country,url,status,code,note
+United Kingdom,https://www.lingua-learn.co.uk/,REDIRECT_OTHER,200,Redirected to lingua-learn.co.uk | Title: Online Language Learning For The UK | Language Training UK
+United Arab Emirates,https://www.lingua-learn.ae/,EMPTY_PAGE,200,Title: Bot Verification | Low content length (37 chars) | Brand mismatch (title doesn't contain 'lingua/learn')
+Oman,https://www.lingua-learn.om/,REDIRECT_OTHER,200,Redirected to lingua-learn.om | Title: Lingua Learn Oman – Virtual Training in Oman
+Qatar,https://www.lingua-learn.qa/,EMPTY_PAGE,200,Title: Bot Verification | Low content length (37 chars) | Brand mismatch (title doesn't contain 'lingua/learn')
+Czechia,https://lingua-learn.cz/,EMPTY_PAGE,200,Title: Bot Verification | Low content length (37 chars) | Brand mismatch (title doesn't contain 'lingua/learn')
+Italy,https://www.lingua-learn.it/,REDIRECT_MAIN,200,Redirected to .com (lingua-learn.com) | Title: Trusted Online Language Institute and Corporate Training
+Spain,https://www.lingua-learn.es/,REDIRECT_MAIN,200,Redirected to .com (www.lingua-learn.com) | Title: Bot Verification | Low content length (37 chars) | Brand mismatch (title doesn't contain 'lingua/learn')
+Switzerland,http://www.lingua-learn.ch/,REDIRECT_OTHER,200,Redirected to lingua-learn.ch | Title: Online language courses in Switzerland - Best Institute
+Netherlands,http://www.lingua-learn.nl/,OK,200,No title
+Turkey,https://www.lingua-learn.com.tr/,REDIRECT_OTHER,200,Redirected to lingua-learn.com.tr | Title: Online Dil Kursları - Lingua Learn Türkiye
+Portugal,https://www.lingua-learn.pt/,HTTP_403,403,Status 403 | Title: 403 Forbidden
+Germany,http://www.lingua-learn.de/,HTTP_403,403,Status 403 | Title: 403 Forbidden
+Austria,http://www.lingua-learn.at/,HTTP_403,403,Status 403 | Title: 403 Forbidden
+Armenia,http://www.lingua-learn.am/,OK,200,Title: Գլխավոր էջ - Lingua Learn Armenia
+Greece,http://www.lingua-learn.gr/,HTTP_403,403,Status 403 | Title: 403 Forbidden
+France,http://www.lingua-learn.fr/,HTTP_403,403,Status 403 | Title: 403 Forbidden
+Hong Kong,http://www.lingua-learn.com.hk/,HTTP_403,403,Status 403 | Title: 403 Forbidden
+Indonesia,http://www.lingua-learn.id/,HTTP_403,403,Status 403 | Title: 403 Forbidden
+Vietnam,http://www.lingua-learn.vn/,HTTP_403,403,Status 403 | Title: 403 Forbidden
+Singapore,https://www.lingua-learn.sg/,CONNECTION_ERROR,,[Errno 101] Network is unreachable
+Philippines,https://lingua-learn.ph/,HTTP_403,403,Status 403 | Title: 403 Forbidden
+Thailand,http://www.lingua-learn.in.th/,OK,200,Title: Language Training Institute in Thailand – Virtual Training in Thailand
+Japan,http://www.lingua-learn.jp/,HTTP_403,403,Status 403 | Title: 403 Forbidden
+South Korea,http://www.lingua-learn.kr/,HTTP_403,403,Status 403 | Title: 403 Forbidden
+Malaysia,http://www.lingua-learn.my/,OK,200,Title: Language Training Specialist in Malaysia | Lingua Learn Malaysia
+South Africa,http://www.lingua-learn.co.za/,OK,200,Title: Language Training Institute in South Africa – Virtual Training in South Africa
+New Zealand,http://www.lingua-learn.nz/,OK,200,Title: Learn a Language Online in New Zealand | Lingua Learn NZ
+Belgium,https://www.lingua-learn.be/,OK,200,Title: Top Online Course Platforms In Belgium For Language & Skills
+Bulgaria,http://www.lingua-learn.bg/,OK,200,Title: Онлайн Обучение по Езици и Умения | Lingua Learn България
+Hungary,http://www.lingua-learn.hu/,HTTP_403,403,Status 403 | Title: 403 Forbidden
+Australia,http://www.lingua-learn.au/,OK,200,Title: Language School Online | Lingua Learn Australia
+Azerbaijan,http://www.lingua-learn.az/,TIMEOUT,,timed out
+Cambodia,http://www.lingua-learn.asia/,OK,200,Title: Lingua Learn Cambodia | វគ្គសិក្សាភាសាអនឡាញ និងក្រុមហ៊ុន
+Taiwan,http://www.lingua-learn.tw/,TIMEOUT,,timed out
+Malta,http://www.lingua-learn.mt/,EMPTY_PAGE,200,Title: Bot Verification | Low content length (37 chars) | Brand mismatch (title doesn't contain 'lingua/learn')
+Canada,http://www.lingua-learn.ca/,CONNECTION_ERROR,,[Errno 101] Network is unreachable
+Poland,https://www.lingua-learn.pl/,EMPTY_PAGE,200,Title: Bot Verification | Low content length (37 chars) | Brand mismatch (title doesn't contain 'lingua/learn')
+United States,http://www.lingua-learn.us/,OK,200,No title
+Jordan,http://www.lingua-learn.jo/,CONNECTION_ERROR,,[Errno 101] Network is unreachable
+Colombia,https://www.lingua-learn.co/,EMPTY_PAGE,200,Title: Bot Verification | Low content length (37 chars) | Brand mismatch (title doesn't contain 'lingua/learn')
+Brazil,https://www.lingua-learn.com.br/,BRAND_MISMATCH,200,Title: Home | Brand mismatch (title doesn't contain 'lingua/learn')
+Cyprus,https://lingua-learn.com.cy,EMPTY_PAGE,200,Title: Bot Verification | Low content length (37 chars) | Brand mismatch (title doesn't contain 'lingua/learn')
+Romania,#,COMING_SOON,,COMING_SOON
+Chile,https://www.lingua-learn.cl/,OK,403,SSL_ERROR (cert invalid) — page readable | No title
+Lithuania,https://www.lingua-learn.lt/,OK,403,SSL_ERROR (cert invalid) — page readable | No title
+Costa Rica,https://www.lingua-learn.cr/,CONNECTION_ERROR,,[Errno -2] Name or service not known
+Kenya,#,COMING_SOON,,COMING_SOON
+Romania,#,COMING_SOON,,COMING_SOON
+Kenya,#,COMING_SOON,,COMING_SOON
